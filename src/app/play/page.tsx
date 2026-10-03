@@ -3270,6 +3270,8 @@ function PlayPageClient() {
       }
 
       if (!detailData && sourcesInfo.length === 0) {
+        // 自动换源会话中：继续试下一个候选，耗尽才真正报错
+        if (await failoverToNextCandidate()) return;
         setError('未找到匹配结果');
         setLoading(false);
         return;
@@ -3295,6 +3297,8 @@ function PlayPageClient() {
             }
           }
         } else {
+          // 自动换源会话中：继续试下一个候选，耗尽才真正报错
+          if (await failoverToNextCandidate()) return;
           setError('未找到匹配结果');
           setLoading(false);
           return;
@@ -3331,6 +3335,8 @@ function PlayPageClient() {
       }
 
       if (!detailData) {
+        // 自动换源会话中：继续试下一个候选，耗尽才真正报错
+        if (await failoverToNextCandidate()) return;
         setError('未找到匹配结果');
         setLoading(false);
         return;
@@ -3506,6 +3512,11 @@ function PlayPageClient() {
         return;
       }
 
+      // 手动换源（非自动流程调用）→ 结束自动换源会话
+      if (!autoSwitchingRef.current) {
+        autoSwitchSessionRef.current = 0;
+      }
+
       // 🚀 设置换源标识，防止useEffect重复处理弹幕
       isSourceChangingRef.current = true;
 
@@ -3573,9 +3584,11 @@ function PlayPageClient() {
         (source) => source.source === newSource && source.id === newId
       );
       if (!newDetail) {
-        setError('未找到匹配结果');
+        // 自动换源会话中：该候选已不在列表，继续试下一个
         isSourceChangingRef.current = false;
         setIsVideoLoading(false);
+        if (await failoverToNextCandidate()) return;
+        setError('未找到匹配结果');
         return;
       }
 
@@ -6147,6 +6160,42 @@ function PlayPageClient() {
   const autoSwitchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSwitchTriedRef = useRef<Set<string>>(new Set()); // 本集已试过且失败的 source:id
   const autoSwitchingRef = useRef(false);
+  // 自动换源会话：watchdog 触发后 >0，首帧出现/候选耗尽/手动换源后清零。
+  // initAll 里详情失败时若会话活跃，则继续试下一个候选而不直接报错屏。
+  const autoSwitchSessionRef = useRef<number>(0);
+
+  /**
+   * 自动换源会话中详情失败时的故障转移：继续探测下一个候选源并切换，
+   * 候选耗尽才返回 false（调用方再真正报错）。返回 true 表示已接管。
+   */
+  const failoverToNextCandidate = async (): Promise<boolean> => {
+    if (!autoSwitchSessionRef.current) return false;
+    const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
+    autoSwitchTriedRef.current.add(curKey);
+    if (artPlayerRef.current) {
+      artPlayerRef.current.notice.show =
+        '当前线路详情获取失败，继续自动测速选择可用线路…';
+    }
+    const found = await findNextPlayableCandidate();
+    if (!found) {
+      autoSwitchTriedRef.current.clear();
+      autoSwitchSessionRef.current = 0;
+      return false;
+    }
+    autoSwitchingRef.current = true;
+    try {
+      console.log(
+        `⏭️ 故障转移: ${found.s.source_name || found.s.source} (${found.latency}ms)，切换`
+      );
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = `已找到可用线路（${found.latency}ms），正在切换…`;
+      }
+      await handleSourceChange(found.s.source, found.s.id, found.s.title);
+    } finally {
+      autoSwitchingRef.current = false;
+    }
+    return true;
+  };
   const probeCacheRef = useRef<Map<string, { ok: boolean; latency: number }>>(new Map());
 
   const clearAutoSwitchTimer = () => {
@@ -6232,6 +6281,26 @@ function PlayPageClient() {
     }
   };
 
+  /**
+   * 在候选源列表中按需逐个探测，返回第一个真实可播放的源。
+   * 顺序探测避免并行打爆上游；已试过（含失败）的源跳过，结果走缓存。
+   * 调用方负责提示与会话管理。
+   */
+  const findNextPlayableCandidate = async (): Promise<{
+    s: SearchResult;
+    latency: number;
+  } | null> => {
+    const list = availableSourcesRef.current || [];
+    for (const s of list) {
+      const key = sourceKeyOf(s);
+      if (autoSwitchTriedRef.current.has(key)) continue;
+      const r = await probeSource(s);
+      autoSwitchTriedRef.current.add(key);
+      if (r.ok) return { s, latency: r.latency };
+    }
+    return null;
+  };
+
   const checkAndAutoSwitchSource = async (graceExtended = false) => {
     const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
     if (!video) {
@@ -6244,42 +6313,31 @@ function PlayPageClient() {
         return;
       }
     } else if (video.readyState >= 2) {
-      // 已有首帧：本源可用，清空失败记录
+      // 已有首帧：本源可用，清空失败记录并结束自动换源会话
       autoSwitchTriedRef.current.clear();
+      autoSwitchSessionRef.current = 0;
       return;
     }
     if (autoSwitchingRef.current || isSourceChangingRef.current) return;
 
-    const list = availableSourcesRef.current || [];
     const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
     autoSwitchTriedRef.current.add(curKey);
 
-    // 按需逐个探测：顺序测每个未试源的真实可播放性，找到第一个可播的就切，
-    // 避免并行打爆上游触发限流。已探测过的结果走缓存。
     if (artPlayerRef.current) {
       artPlayerRef.current.notice.show = '当前线路无响应，正在自动测速选择可用线路…';
     }
-    let next: SearchResult | undefined;
-    let nextLatency = 0;
-    for (const s of list) {
-      const key = sourceKeyOf(s);
-      if (autoSwitchTriedRef.current.has(key)) continue;
-      const r = await probeSource(s);
-      autoSwitchTriedRef.current.add(key);
-      if (r.ok) {
-        next = s;
-        nextLatency = r.latency;
-        break;
-      }
-    }
-    if (!next) {
+    const found = await findNextPlayableCandidate();
+    if (!found) {
       autoSwitchTriedRef.current.clear();
+      autoSwitchSessionRef.current = 0;
       console.log('⏭️ 所有候选线路均不可播放，停止自动换源');
       if (artPlayerRef.current) {
         artPlayerRef.current.notice.show = '所有线路均不可播放，请手动切换';
       }
       return;
     }
+    const { s: next, latency: nextLatency } = found;
+    autoSwitchSessionRef.current = Date.now(); // 开启自动换源会话
     autoSwitchingRef.current = true;
     try {
       console.log(
