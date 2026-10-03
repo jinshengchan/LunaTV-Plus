@@ -26,6 +26,7 @@ import SkipController, { SkipSettingsButton } from '@/components/SkipController'
 import VideoCard from '@/components/VideoCard';
 import CommentSection from '@/components/play/CommentSection';
 import DownloadButtons from '@/components/play/DownloadButtons';
+import ExternalPlayerMenu from '@/components/play/ExternalPlayerMenu';
 import FavoriteButton from '@/components/play/FavoriteButton';
 import NetDiskButton from '@/components/play/NetDiskButton';
 import CollapseButton from '@/components/play/CollapseButton';
@@ -6229,6 +6230,11 @@ function PlayPageClient() {
               onDownloadClick={() => setShowDownloadEpisodeSelector(true)}
               onDownloadPanelClick={() => setShowDownloadPanel(true)}
             />
+
+            {/* 外部播放器菜单（移植自 MoonTVPlus） */}
+            {videoUrl && (
+              <ExternalPlayerMenu videoUrl={videoUrl} title={videoTitle} />
+            )}
 
             {/* 折叠控制按钮 - 仅在 lg 及以上屏幕显示 */}
             <CollapseButton
