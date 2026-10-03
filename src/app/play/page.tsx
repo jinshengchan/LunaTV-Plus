@@ -376,6 +376,8 @@ function PlayPageClient() {
     weightsCache: Map<string, any>;
     isActive: boolean;
     renderLoopActive: boolean;
+    resizeHandler: (() => void) | null;
+    resizeTimer: ReturnType<typeof setTimeout> | null;
   }>({
     instance: null,
     gpu: null,
@@ -383,6 +385,8 @@ function PlayPageClient() {
     weightsCache: new Map(),
     isActive: false,
     renderLoopActive: false,
+    resizeHandler: null,
+    resizeTimer: null,
   });
 
   const websrEnabledRef = useRef(websrEnabled);
@@ -2574,6 +2578,32 @@ function PlayPageClient() {
       video.style.opacity = '0';
       video.style.position = 'absolute';
 
+      // 监听视频分辨率变化（HLS 自适应码率切换清晰度时会触发），防抖后重建管线；
+      // 否则 WebSR 内部纹理尺寸与新分辨率不匹配，输出会花屏
+      const onVideoResize = () => {
+        const ref = websrRef.current;
+        if (ref.resizeTimer) clearTimeout(ref.resizeTimer);
+        ref.resizeTimer = setTimeout(async () => {
+          ref.resizeTimer = null;
+          if (!ref.isActive || !artPlayerRef.current?.video) return;
+          const v = artPlayerRef.current.video as HTMLVideoElement;
+          const vw = v.videoWidth, vh = v.videoHeight;
+          if (!vw || !vh) return;
+          const scale = websrModeRef.current === 'upscale' ? 2 : 1;
+          const ew = Math.floor(vw * scale), eh = Math.floor(vh * scale);
+          const c = ref.canvas;
+          if (c && (c.width !== ew || c.height !== eh)) {
+            console.log(`WebSR: 分辨率变化 ${c.width}x${c.height} -> ${ew}x${eh}，重建管线`);
+            await destroyWebSR();
+            if (websrEnabledRef.current) {
+              await initWebSR();
+            }
+          }
+        }, 1200);
+      };
+      video.addEventListener('resize', onVideoResize);
+      websrRef.current.resizeHandler = onVideoResize;
+
       const modeText = websrModeRef.current === 'upscale' ? '2x超分' : '降噪';
       const sizeText = { s: '快速', m: '标准', l: '高质' }[websrNetworkSizeRef.current];
       const typeText = { an: '动漫', rl: '真人', '3d': '3D' }[websrContentTypeRef.current];
@@ -2607,6 +2637,16 @@ function PlayPageClient() {
     const ref = websrRef.current;
     ref.isActive = false;
     ref.renderLoopActive = false;
+
+    // 移除分辨率变化监听
+    if (ref.resizeTimer) {
+      clearTimeout(ref.resizeTimer);
+      ref.resizeTimer = null;
+    }
+    if (ref.resizeHandler && artPlayerRef.current?.video) {
+      artPlayerRef.current.video.removeEventListener('resize', ref.resizeHandler);
+      ref.resizeHandler = null;
+    }
 
     try {
       if (ref.instance) {
