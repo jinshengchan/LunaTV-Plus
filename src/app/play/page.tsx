@@ -6164,26 +6164,21 @@ function PlayPageClient() {
 
   const sourceKeyOf = (s: SearchResult) => `${s.source}:${s.id}`;
 
-  /** 取出某源当前集的真实可播放地址（短剧需经解析接口） */
+  /** 取出某源当前集的真实可播放地址（短剧需经解析接口）
+   *  注意：必须走 fetchSourceDetail（即 /api/detail），与播放页 initAll 完全一致，
+   *  不能用 s.episodes 走捷径——否则探测通过但切换后详情失败会跳报错屏。
+   */
   const resolveEpisodePlayUrl = async (s: SearchResult): Promise<string | null> => {
     try {
+      const details = await fetchSourceDetail(
+        s.source,
+        s.id,
+        s.title || videoTitleRef.current
+      );
+      if (!details.length || !details[0].episodes?.length) return null;
       const epIdx = currentEpisodeIndexRef.current ?? 0;
-      let ep: string | undefined;
-      // 搜索结果自带 episodes 则直接用，缺失再调详情接口
-      if (s.episodes?.length) {
-        ep = s.episodes[Math.min(epIdx, s.episodes.length - 1)];
-      } else {
-        const details = await fetchSourceDetail(
-          s.source,
-          s.id,
-          s.title || videoTitleRef.current
-        );
-        if (!details.length || !details[0].episodes?.length) return null;
-        ep =
-          details[0].episodes[
-            Math.min(epIdx, details[0].episodes.length - 1)
-          ];
-      }
+      const ep =
+        details[0].episodes[Math.min(epIdx, details[0].episodes.length - 1)];
       if (!ep) return null;
       // 短剧分集形如 shortdrama:{videoId}:{index}，需解析出直链
       if (ep.startsWith('shortdrama:')) {

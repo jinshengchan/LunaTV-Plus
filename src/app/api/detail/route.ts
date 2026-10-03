@@ -305,6 +305,10 @@ export async function GET(request: NextRequest) {
         filter: `source:${sourceCode}`,
       });
 
+      console.warn(
+        `[detail-400-invalid-source] source=${sourceCode} id=${id} title=${title} availableKeys=${apiSites.map((s) => s.key).join(',')}`
+      );
+
       return NextResponse.json(errorResponse, { status: 400 });
     }
 
@@ -349,6 +353,11 @@ export async function GET(request: NextRequest) {
         responseSize: errorSize,
         filter: `source:${sourceCode}|id:${id}`,
       });
+
+      // 诊断日志：记录 404 时的参数，便于排查自动换源失败
+      console.warn(
+        `[detail-404] source=${sourceCode} id=${id} title=${title} duration=${Date.now() - startTime}ms`
+      );
 
       return NextResponse.json(errorResponse, { status: 404 });
     }
