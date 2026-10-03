@@ -62,6 +62,13 @@ import {
 } from '@/lib/db.client';
 import { getDoubanDetails, getDoubanComments, getDoubanActorMovies } from '@/lib/douban.client';
 import { SearchResult } from '@/lib/types';
+import {
+  createSourceFailoverSession,
+  findNextPlayableSource,
+  resetSourceFailoverSession,
+  SourceFailoverSession,
+  SourceProbe,
+} from '@/lib/source-failover';
 import { applyFirstPartyM3u8Proxy, applyVideoPlayProxy, getArtPlayerType, getVideoResolutionFromM3u8, isFirstPartyM3u8Proxy, processImageUrl, stripVideoPlayProxy, VideoSourceTestResult } from '@/lib/utils';
 import { useWatchRoomContextSafe } from '@/components/WatchRoomProvider';
 import { useWatchRoomSync } from './hooks/useWatchRoomSync';
@@ -220,7 +227,12 @@ interface WakeLockSentinel {
   removeEventListener(type: 'release', listener: () => void): void;
 }
 
-function PlayPageClient() {
+function PlayPageClient({ failover }: { failover: SourceFailoverSession<SearchResult> }) {
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const router = useRouter();
   const searchParams = useSearchParams();
   const { createTask, setShowDownloadPanel } = useDownload();
@@ -1501,7 +1513,9 @@ function PlayPageClient() {
   // 获取源权重映射
   const fetchSourceWeights = async (): Promise<Record<string, number>> => {
     try {
-      const response = await fetch('/api/source-weights');
+      const response = await fetch('/api/source-weights', {
+        signal: AbortSignal.timeout(3000),
+      });
       if (!response.ok) {
         console.warn('获取源权重失败，使用默认权重');
         return {};
@@ -1521,19 +1535,6 @@ function PlayPageClient() {
       const weightB = weights[b.source] ?? 50;
       return weightB - weightA; // 降序排列，权重高的在前
     });
-  };
-
-  // 设置可用源列表（先按权重排序）
-  const setAvailableSourcesWithWeight = async (sources: SearchResult[]): Promise<SearchResult[]> => {
-    if (sources.length <= 1) {
-      setAvailableSources(sources);
-      return sources;
-    }
-    const weights = await fetchSourceWeights();
-    const sortedSources = sortSourcesByWeight(sources, weights);
-    console.log('按权重排序可用源:', sortedSources.map(s => `${s.source_name}(${weights[s.source] ?? 50})`).slice(0, 5), '...');
-    setAvailableSources(sortedSources);
-    return sortedSources;
   };
 
   // 播放源优选函数（针对旧iPad做极端保守优化）
@@ -2973,14 +2974,16 @@ function PlayPageClient() {
         const dramaTitle = searchParams.get('title') || videoTitleRef.current || '';
         const titleParam = dramaTitle ? `&name=${encodeURIComponent(dramaTitle)}` : '';
         detailResponse = await fetch(
-          `/api/shortdrama/detail?id=${id}&episode=1${titleParam}`
+          `/api/shortdrama/detail?id=${id}&episode=1${titleParam}`,
+          { signal: AbortSignal.timeout(12000) }
         );
       } else {
         // 所有其他源（包括 Emby）统一使用 /api/detail
         // 添加 title 参数用于搜索匹配
         const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
         detailResponse = await fetch(
-          `/api/detail?source=${source}&id=${id}${titleParam}`
+          `/api/detail?source=${source}&id=${id}${titleParam}`,
+          { signal: AbortSignal.timeout(12000) }
         );
       }
 
@@ -3011,6 +3014,7 @@ function PlayPageClient() {
 
   // 进入页面时直接获取全部源信息
   useEffect(() => {
+    let cancelled = false;
     const fetchSourcesData = async (query: string): Promise<SearchResult[]> => {
       // 使用智能搜索变体获取全部源信息
       try {
@@ -3026,8 +3030,10 @@ function PlayPageClient() {
           console.log('尝试搜索变体:', variant);
 
           const response = await fetch(
-            `/api/search?q=${encodeURIComponent(variant)}`
-          );
+            `/api/search?q=${encodeURIComponent(variant)}`,
+            { signal: AbortSignal.timeout(15000) }
+          ).catch(() => null);
+          if (!response) continue;
           if (!response.ok) {
             console.warn(`搜索变体 "${variant}" 失败:`, response.statusText);
             continue;
@@ -3195,16 +3201,14 @@ function PlayPageClient() {
         }
 
         console.log(`智能搜索完成，最终返回 ${finalResults.length} 个结果`);
-        // 按权重排序后设置可用源列表
-        const sortedResults = await setAvailableSourcesWithWeight(finalResults);
-        return sortedResults;
+        // 按权重排序；调用方统一发布结果，避免覆盖当前源或使用过期状态。
+        return sortSourcesByWeight(finalResults, await fetchSourceWeights());
       } catch (err) {
         console.error('智能搜索失败:', err);
-        setSourceSearchError(err instanceof Error ? err.message : '搜索失败');
-        setAvailableSources([]);
+        if (!cancelled) setSourceSearchError(err instanceof Error ? err.message : '搜索失败');
         return [];
       } finally {
-        setSourceSearchLoading(false);
+        if (!cancelled) setSourceSearchLoading(false);
       }
     };
 
@@ -3214,6 +3218,7 @@ function PlayPageClient() {
         setLoading(false);
         return;
       }
+      setError(null);
       setLoading(true);
       setLoadingStage(currentSource && currentId ? 'fetching' : 'searching');
       setLoadingMessage(
@@ -3230,11 +3235,15 @@ function PlayPageClient() {
         // 先快速获取当前源的详情
         try {
           console.log('[Play] 获取当前源详情:', currentSource, currentId);
-          const currentSourceDetail = await fetchSourceDetail(
+          const cachedDetail = failover.sessionId
+            ? failover.probes.get(`${currentSource}:${currentId}`)?.detail
+            : undefined;
+          const currentSourceDetail = cachedDetail ? [cachedDetail] : await fetchSourceDetail(
             currentSource,
             currentId,
             searchTitle || videoTitle
           );
+          if (cancelled) return;
           console.log('[Play] 获取到的详情:', currentSourceDetail);
           if (currentSourceDetail.length > 0) {
             detailData = currentSourceDetail[0];
@@ -3247,26 +3256,46 @@ function PlayPageClient() {
           console.error('获取当前源详情失败:', err);
         }
 
-        // 异步获取其他源信息，不阻塞播放
-        setBackgroundSourcesLoading(true);
-        fetchSourcesData(searchTitle || videoTitle).then((sources) => {
-          // 合并当前源和搜索到的其他源
-          const allSources = [...sourcesInfo];
-          sources.forEach((source) => {
-            // 避免重复添加当前源
-            if (!(source.source === currentSource && source.id === currentId)) {
-              allSources.push(source);
-            }
-          });
-          setAvailableSources(allSources);
-          setBackgroundSourcesLoading(false);
-        }).catch((err) => {
-          console.error('异步获取其他源失败:', err);
-          setBackgroundSourcesLoading(false);
+        // 当前源可用时保持快速启动；失败时故障转移会等待同一个搜索任务。
+        const initialDetails = [...sourcesInfo];
+        const sourcesPromise = failover.pendingSources || (
+          failover.sessionId && failover.sources.length > 0
+            ? Promise.resolve(failover.sources)
+            : fetchSourcesData(searchTitle || videoTitle)
+        );
+        const pending = sourcesPromise.catch(() => []).then((sources) => {
+          const allSources = Array.from(new Map(
+            [...initialDetails, ...sources].map(source => [`${source.source}:${source.id}`, source])
+          ).values());
+          failover.sources = allSources;
+          if (!cancelled) {
+            availableSourcesRef.current = allSources;
+            setAvailableSources(allSources);
+            setBackgroundSourcesLoading(false);
+          }
+          return allSources;
         });
+        failover.pendingSources = pending;
+        setBackgroundSourcesLoading(true);
+        void pending.finally(() => {
+          if (failover.pendingSources === pending) failover.pendingSources = null;
+        });
+        if (!detailData?.episodes?.length) {
+          failover.sessionId ||= Date.now();
+          setLoadingMessage('当前线路详情不可用，正在搜索并尝试其他线路…');
+          if (await failoverToNextCandidate()) return;
+          if (cancelled) return;
+          setError('当前线路不可用，未找到可播放的备用线路');
+          setLoading(false);
+          return;
+        }
       } else {
         // 没有source和id，正常搜索流程
         sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
+        if (cancelled) return;
+        failover.sources = sourcesInfo;
+        availableSourcesRef.current = sourcesInfo;
+        setAvailableSources(sourcesInfo);
       }
 
       if (!detailData && sourcesInfo.length === 0) {
@@ -3384,7 +3413,8 @@ function PlayPageClient() {
       }, 1000);
     };
 
-    initAll();
+    void initAll();
+    return () => { cancelled = true; };
   }, [reloadTrigger]); // 添加 reloadTrigger 作为依赖，当它变化时重新执行 initAll
 
   // 播放记录处理
@@ -3503,18 +3533,19 @@ function PlayPageClient() {
   const handleSourceChange = async (
     newSource: string,
     newId: string,
-    newTitle: string
+    newTitle: string,
+    automatic = false,
   ) => {
     try {
       // 防止连续点击换源
       if (isSourceChangingRef.current) {
         console.log('⏸️ 正在换源中，忽略重复点击');
-        return;
+        return false;
       }
 
       // 手动换源（非自动流程调用）→ 结束自动换源会话
-      if (!autoSwitchingRef.current) {
-        autoSwitchSessionRef.current = 0;
+      if (!automatic) {
+        resetSourceFailoverSession(failover);
       }
 
       // 🚀 设置换源标识，防止useEffect重复处理弹幕
@@ -3580,16 +3611,15 @@ function PlayPageClient() {
           .catch((err) => console.error('清除播放记录失败:', err));
       }
 
-      const newDetail = availableSources.find(
+      const newDetail = failover.probes.get(`${newSource}:${newId}`)?.detail || failover.sources.find(
         (source) => source.source === newSource && source.id === newId
       );
       if (!newDetail) {
         // 自动换源会话中：该候选已不在列表，继续试下一个
         isSourceChangingRef.current = false;
         setIsVideoLoading(false);
-        if (await failoverToNextCandidate()) return;
-        setError('未找到匹配结果');
-        return;
+        if (!automatic) setError('未找到匹配结果');
+        return false;
       }
 
       // 如果是 emby 源且 episodes 为空，需要调用 detail 接口获取完整信息
@@ -3648,6 +3678,8 @@ function PlayPageClient() {
       setCurrentSource(newSource);
       setCurrentId(newId);
       setDetail(detailToUse);
+      setError(null);
+      setLoading(false);
 
       // 🔥 只有当集数确实改变时才调用 setCurrentEpisodeIndex
       // 这样可以避免触发不必要的 useEffect 和集数切换逻辑
@@ -3657,6 +3689,7 @@ function PlayPageClient() {
 
       // 🚀 换源标记和弹幕加载改由实际执行 switchQuality 的 effect 在切换真正完成后触发，
       // 不再用固定延迟猜测新源何时可播放（见 loadDanmuAfterSourceSwitch 调用处）
+      return true;
 
     } catch (err) {
       // 重置换源标识
@@ -3664,7 +3697,11 @@ function PlayPageClient() {
 
       // 隐藏换源加载状态
       setIsVideoLoading(false);
-      setError(err instanceof Error ? err.message : '换源失败');
+      if (!automatic) {
+        setLoading(false);
+        setError(err instanceof Error ? err.message : '换源失败');
+      }
+      return false;
     }
   };
 
@@ -6160,45 +6197,44 @@ function PlayPageClient() {
   // 找到第一个可播的就切；失败的源同集内不再试。探测是串行的，避免并行打爆上游触发限流。
   const AUTO_SWITCH_TIMEOUT_MS = 20000;
   const autoSwitchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoSwitchTriedRef = useRef<Set<string>>(new Set()); // 本集已试过且失败的 source:id
   const autoSwitchingRef = useRef(false);
   // 自动换源会话：watchdog 触发后 >0，首帧出现/候选耗尽/手动换源后清零。
   // initAll 里详情失败时若会话活跃，则继续试下一个候选而不直接报错屏。
-  const autoSwitchSessionRef = useRef<number>(0);
 
   /**
    * 自动换源会话中详情失败时的故障转移：继续探测下一个候选源并切换，
    * 候选耗尽才返回 false（调用方再真正报错）。返回 true 表示已接管。
    */
   const failoverToNextCandidate = async (): Promise<boolean> => {
-    if (!autoSwitchSessionRef.current) return false;
-    const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
-    autoSwitchTriedRef.current.add(curKey);
-    if (artPlayerRef.current) {
-      artPlayerRef.current.notice.show =
-        '当前线路详情获取失败，继续自动测速选择可用线路…';
-    }
-    const found = await findNextPlayableCandidate();
-    if (!found) {
-      autoSwitchTriedRef.current.clear();
-      autoSwitchSessionRef.current = 0;
-      return false;
-    }
+    if (!failover.sessionId) return false;
+    if (autoSwitchingRef.current) return true;
     autoSwitchingRef.current = true;
+    const revision = failover.revision;
+    const isCurrent = () => mountedRef.current && failover.revision === revision;
+    failover.tried.add(`${currentSourceRef.current}:${currentIdRef.current}`);
     try {
-      console.log(
-        `⏭️ 故障转移: ${found.s.source_name || found.s.source} (${found.latency}ms)，切换`
-      );
       if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = `已找到可用线路（${found.latency}ms），正在切换…`;
+        artPlayerRef.current.notice.show = '当前线路不可用，正在搜索并尝试其他线路…';
       }
-      await handleSourceChange(found.s.source, found.s.id, found.s.title);
+      while (isCurrent()) {
+        const found = await findNextPlayableCandidate();
+        // Unmounted players and superseded selections must not publish errors.
+        if (!isCurrent()) return true;
+        if (!found) {
+          failover.sessionId = 0;
+          return false;
+        }
+        console.log(`⏭️ 故障转移: ${found.s.source_name || found.s.source} (${found.latency}ms)，切换`);
+        if (artPlayerRef.current) {
+          artPlayerRef.current.notice.show = `已找到可用线路（${found.latency}ms），正在切换…`;
+        }
+        if (await handleSourceChange(found.s.source, found.s.id, found.s.title, true)) return true;
+      }
+      return true;
     } finally {
       autoSwitchingRef.current = false;
     }
-    return true;
   };
-  const probeCacheRef = useRef<Map<string, { ok: boolean; latency: number }>>(new Map());
 
   const clearAutoSwitchTimer = () => {
     if (autoSwitchTimerRef.current) {
@@ -6207,19 +6243,19 @@ function PlayPageClient() {
     }
   };
 
-  // 换视频/换集时重置已试记录与探测缓存（同集内自动换源不重置，避免重复试坏源）
+  // Only changing episodes resets failures; source IDs change during failover.
   useEffect(() => {
-    autoSwitchTriedRef.current.clear();
-    probeCacheRef.current.clear();
-  }, [currentId, currentEpisodeIndex]);
-
-  const sourceKeyOf = (s: SearchResult) => `${s.source}:${s.id}`;
+    if (failover.episodeIndex !== null && failover.episodeIndex !== currentEpisodeIndex) {
+      resetSourceFailoverSession(failover);
+    }
+    failover.episodeIndex = currentEpisodeIndex;
+  }, [currentEpisodeIndex, failover]);
 
   /** 取出某源当前集的真实可播放地址（短剧需经解析接口）
    *  注意：必须走 fetchSourceDetail（即 /api/detail），与播放页 initAll 完全一致，
    *  不能用 s.episodes 走捷径——否则探测通过但切换后详情失败会跳报错屏。
    */
-  const resolveEpisodePlayUrl = async (s: SearchResult): Promise<string | null> => {
+  const resolveEpisodePlayUrl = async (s: SearchResult): Promise<{ url: string; detail: SearchResult } | null> => {
     try {
       const details = await fetchSourceDetail(
         s.source,
@@ -6228,57 +6264,53 @@ function PlayPageClient() {
       );
       if (!details.length || !details[0].episodes?.length) return null;
       const epIdx = currentEpisodeIndexRef.current ?? 0;
-      const ep =
-        details[0].episodes[Math.min(epIdx, details[0].episodes.length - 1)];
+      const ep = details[0].episodes[epIdx];
       if (!ep) return null;
       // 短剧分集形如 shortdrama:{videoId}:{index}，需解析出直链
       if (ep.startsWith('shortdrama:')) {
         const [, videoId, indexStr] = ep.split(':');
         const res = await fetch(
-          `/api/shortdrama/parse?id=${videoId}&episode=${indexStr || '0'}`
+          `/api/shortdrama/parse?id=${videoId}&episode=${indexStr || '0'}`,
+          { signal: AbortSignal.timeout(12000) }
         );
         if (!res.ok) return null;
         const data = await res.json();
         const url = data?.url || '';
-        return /^https?:\/\//i.test(url) ? url : null;
+        return /^https?:\/\//i.test(url) ? { url, detail: details[0] } : null;
       }
-      return /^https?:\/\//i.test(ep) ? ep : null;
+      return /^https?:\/\//i.test(ep) ? { url: ep, detail: details[0] } : null;
     } catch {
       return null;
     }
   };
 
-  /** 探测单个源的可播放性（带缓存）：服务端拉 m3u8 验有效性 */
+  /** 探测单个源的可播放性；缓存由故障转移会话保存 */
   const probeSource = async (
     s: SearchResult
-  ): Promise<{ ok: boolean; latency: number }> => {
-    const key = sourceKeyOf(s);
-    const cached = probeCacheRef.current.get(key);
-    if (cached) return cached;
+  ): Promise<SourceProbe<SearchResult>> => {
     const fail = { ok: false, latency: 9999 };
     try {
-      const playUrl = await resolveEpisodePlayUrl(s);
-      if (!playUrl) {
-        probeCacheRef.current.set(key, fail);
+      const resolved = await resolveEpisodePlayUrl(s);
+      if (!resolved) {
         return fail;
       }
       const t0 = performance.now();
       const res = await fetch(
-        `/api/probe-video?url=${encodeURIComponent(playUrl)}`
+        `/api/probe-video?url=${encodeURIComponent(resolved.url)}`,
+        { signal: AbortSignal.timeout(10000) }
       );
       const data = await res.json().catch(() => null);
       const r = {
-        ok: !!(data && data.ok),
+        ok: !!(res.ok && data && data.ok),
+        detail: resolved.detail,
         latency: data && data.ok ? Math.round(performance.now() - t0) : 9999,
       };
-      probeCacheRef.current.set(key, r);
       console.log(
         `⏭️ 探测 ${s.source_name || s.source}: ${r.ok ? `可播 ${r.latency}ms` : '不可播'}`
       );
       return r;
     } catch (err) {
       console.warn(`⏭️ 探测 ${s.source_name || s.source} 异常:`, err);
-      probeCacheRef.current.set(key, fail);
       return fail;
     }
   };
@@ -6292,67 +6324,35 @@ function PlayPageClient() {
     s: SearchResult;
     latency: number;
   } | null> => {
-    const list = availableSourcesRef.current || [];
-    for (const s of list) {
-      const key = sourceKeyOf(s);
-      if (autoSwitchTriedRef.current.has(key)) continue;
-      const r = await probeSource(s);
-      autoSwitchTriedRef.current.add(key);
-      if (r.ok) return { s, latency: r.latency };
-    }
-    return null;
+    return findNextPlayableSource(failover, probeSource, () => mountedRef.current);
   };
 
   const checkAndAutoSwitchSource = async (graceExtended = false) => {
+    if (!mountedRef.current) return;
     const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
-    if (!video) {
-      // 播放器还没建好：给 5 秒宽限再查一次；仍无播放器则按无画面处理
-      if (!graceExtended) {
-        autoSwitchTimerRef.current = setTimeout(() => {
-          autoSwitchTimerRef.current = null;
-          void checkAndAutoSwitchSource(true);
-        }, 5000);
-        return;
-      }
-    } else if (video.readyState >= 2) {
-      // 已有首帧：本源可用，清空失败记录并结束自动换源会话
-      autoSwitchTriedRef.current.clear();
-      autoSwitchSessionRef.current = 0;
+    if (!video && !graceExtended) {
+      autoSwitchTimerRef.current = setTimeout(() => {
+        autoSwitchTimerRef.current = null;
+        void checkAndAutoSwitchSource(true);
+      }, 5000);
       return;
     }
-    if (autoSwitchingRef.current || isSourceChangingRef.current) return;
-
-    const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
-    autoSwitchTriedRef.current.add(curKey);
-
+    if (video && video.readyState >= 2) {
+      resetSourceFailoverSession(failover);
+      return;
+    }
+    if (autoSwitchingRef.current) return;
+    // A switch that has not produced a frame by the watchdog deadline is failed,
+    // rather than leaving its busy flag stuck forever.
+    isSourceChangingRef.current = false;
+    failover.sessionId ||= Date.now();
+    if (await failoverToNextCandidate()) return;
+    if (!mountedRef.current) return;
+    setIsVideoLoading(false);
+    setLoading(false);
+    // 已有播放器时保留播放页和换源入口，避免自动流程把用户困在错误页。
     if (artPlayerRef.current) {
-      artPlayerRef.current.notice.show = '当前线路无响应，正在自动测速选择可用线路…';
-    }
-    const found = await findNextPlayableCandidate();
-    if (!found) {
-      autoSwitchTriedRef.current.clear();
-      autoSwitchSessionRef.current = 0;
-      console.log('⏭️ 所有候选线路均不可播放，停止自动换源');
-      if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = '所有线路均不可播放，请手动切换';
-      }
-      return;
-    }
-    const { s: next, latency: nextLatency } = found;
-    autoSwitchSessionRef.current = Date.now(); // 开启自动换源会话
-    autoSwitchingRef.current = true;
-    try {
-      console.log(
-        `⏭️ 自动测速选中: ${next.source_name || next.source} (${nextLatency}ms)，切换`
-      );
-      if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = `已找到可用线路（${nextLatency}ms），正在切换…`;
-      }
-      await handleSourceChange(next.source, next.id, next.title);
-    } catch (err) {
-      console.warn('自动换源失败:', err);
-    } finally {
-      autoSwitchingRef.current = false;
+      artPlayerRef.current.notice.show = '自动尝试已完成，暂无可播放线路，请手动换源或重试';
     }
   };
 
@@ -7400,9 +7400,32 @@ export default function PlayPage() {
 
 function PlayPageClientWrapper() {
   const searchParams = useSearchParams();
+  const reload = searchParams.get('_reload') || '';
+  const scope = JSON.stringify([
+    searchParams.get('douban_id') || searchParams.get('stitle') || searchParams.get('title') || '',
+    reload,
+  ]);
+  const sessionRef = useRef<{
+    scope: string;
+    key: string;
+    reload: string;
+    value: SourceFailoverSession<SearchResult>;
+  } | null>(null);
+  if (!sessionRef.current || sessionRef.current.scope !== scope) {
+    const previous = sessionRef.current;
+    const tested = previous?.value.probes.get(`${searchParams.get('source')}:${searchParams.get('id')}`);
+    // initAll may normalize the title to the tested detail's title. That is
+    // still the same video, including links which do not have a Douban ID.
+    if (previous?.value.sessionId && previous.reload === reload && tested?.ok &&
+      tested.detail?.title === searchParams.get('title')) {
+      previous.scope = scope;
+    } else {
+      sessionRef.current = { scope, key: scope, reload, value: createSourceFailoverSession<SearchResult>() };
+    }
+  }
   // 使用 source + id 作为 key，强制在切换源时重新挂载组件
   // 参考：https://github.com/vercel/next.js/issues/2819
-  const key = `${searchParams.get('source')}-${searchParams.get('id')}-${searchParams.get('_reload') || ''}`;
+  const key = `${sessionRef.current!.key}-${searchParams.get('source')}-${searchParams.get('id')}`;
 
-  return <PlayPageClient key={key} />;
+  return <PlayPageClient key={key} failover={sessionRef.current!.value} />;
 }
