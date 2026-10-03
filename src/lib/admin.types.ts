@@ -1,3 +1,5 @@
+import type { OpenListRuntimeConfig } from './openlist-config';
+
 export interface AdminConfig {
   ConfigSubscribtion: {
     URL: string;
@@ -281,6 +283,17 @@ export interface AdminConfig {
     showNewAnime: boolean;
     showHotVariety: boolean;
     showHotShortDramas: boolean;
+  };
+  // OpenList 私人影库（移植自 MoonTVPlus，类型定义见 src/lib/openlist-config.ts）
+  openlist?: OpenListRuntimeConfig;
+  // 小雅私人影库（移植自 MoonTVPlus）
+  XiaoyaConfig?: {
+    Enabled: boolean;                    // 是否启用
+    ServerURL: string;                   // Alist 服务器地址
+    Token?: string;                      // Token 认证（推荐）
+    Username?: string;                   // 用户名认证（备选）
+    Password?: string;                   // 密码认证（备选）
+    DisableVideoPreview?: boolean;       // 禁用预览视频，直接返回直连链接
   };
 }
 
