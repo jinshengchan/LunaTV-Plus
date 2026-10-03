@@ -153,3 +153,89 @@ export async function getRecommendedShortDramas(
     }
   }
 }
+
+export const DEFAULT_SHORTDRAMA_API =
+  'https://tyyszyapi.com/api.php/provide/vod';
+
+/** 获取启用的短剧上游 API 列表（配置源 + 默认源兜底） */
+export async function getShortDramaApiList(): Promise<string[]> {
+  try {
+    const config = await getConfig();
+    const apis = ((config.SourceConfig || []) as any[])
+      .filter((s) => s.type === 'shortdrama' && !s.disabled && s.api)
+      .map((s) => s.api as string);
+    if (!apis.includes(DEFAULT_SHORTDRAMA_API)) {
+      apis.push(DEFAULT_SHORTDRAMA_API);
+    }
+    return apis;
+  } catch {
+    return [DEFAULT_SHORTDRAMA_API];
+  }
+}
+
+export interface ShortDramaVodInfo {
+  api: string;
+  vodId: number;
+  vodName: string;
+  cover: string;
+  description: string;
+  /** 按集数顺序的直链（取第一组播放源） */
+  episodeUrls: string[];
+}
+
+/** 解析资源站 vod_play_url：取第一组，按 # 分集、$ 取直链 */
+function parseVodPlayUrl(vodPlayUrl: string): string[] {
+  if (!vodPlayUrl) return [];
+  const firstGroup = vodPlayUrl.split('$$$')[0] || '';
+  return firstGroup
+    .split('#')
+    .map((part) => {
+      const idx = part.indexOf('$');
+      const url = (idx >= 0 ? part.slice(idx + 1) : part).trim();
+      return url;
+    })
+    .filter((u) => /^https?:\/\//i.test(u));
+}
+
+/**
+ * 直调上游资源站 ?ac=detail&ids= 获取短剧分集直链。
+ * 依次尝试各配置源，拿到有效分集即返回；全部失败返回 null。
+ *
+ * 背景：shortdrama.client.ts 的 parseShortDramaEpisode 在内部用相对路径
+ * fetch('/api/shortdrama/parse')，而 /api/shortdrama/parse 与 /api/shortdrama/detail
+ * 两个服务端路由又反过来调用它，导致服务端循环调用、相对 URL 解析失败，
+ * 短剧详情/解析在未配置备用 API 时永远失败。此处改为服务端直接请求上游。
+ */
+export async function fetchShortDramaVod(
+  videoId: number
+): Promise<ShortDramaVodInfo | null> {
+  const apis = await getShortDramaApiList();
+  for (const api of apis) {
+    try {
+      const res = await fetch(`${api}?ac=detail&ids=${videoId}`, {
+        headers: {
+          'User-Agent': DEFAULT_USER_AGENT,
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const vod = data?.list?.[0];
+      if (!vod) continue;
+      const episodeUrls = parseVodPlayUrl(vod.vod_play_url || '');
+      if (episodeUrls.length === 0) continue;
+      return {
+        api,
+        vodId: videoId,
+        vodName: vod.vod_name || '',
+        cover: vod.vod_pic || '',
+        description: vod.vod_content || vod.vod_blurb || '',
+        episodeUrls,
+      };
+    } catch (err) {
+      console.warn(`[shortdrama] 上游 ${api} 获取详情失败:`, err);
+    }
+  }
+  return null;
+}
