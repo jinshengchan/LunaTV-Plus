@@ -43,8 +43,11 @@ const PLAYERS: ExternalPlayer[] = [
   {
     name: 'MX Player',
     icon: '/players/mxplayer.png',
+    // 注意：不要写死 package=com.mxtech.videoplayer.ad —— 用户侧载版/Pro 版的包名可能不同，
+    // 写死后 Chrome 找不到包会直接跳 Play 商店。用通用 VIEW intent 调起系统选择器，
+    // 用户从中选择 MX Player 即可（可设为默认）。
     buildSchemeUrl: (videoUrl, title) =>
-      `intent://${videoUrl}#Intent;package=com.mxtech.videoplayer.ad;S.title=${encodeURIComponent(title)};end`,
+      `intent:${videoUrl}#Intent;action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(title)};end`,
   },
   {
     name: 'nPlayer',
