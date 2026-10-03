@@ -1,8 +1,8 @@
- 
+/* eslint-disable @typescript-eslint/no-explicit-any */
 'use client';
 
-import { Activity, AlertCircle, Check, Copy, ExternalLink, HardDriveDownload, Loader2 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertCircle, Copy, ExternalLink, Loader2, Check } from 'lucide-react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 
 interface AcgSearchItem {
   title: string;
@@ -41,14 +41,6 @@ export default function AcgSearch({
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  // 种子健康检查（移植自 MoonTVPlus）
-  const [healthMap, setHealthMap] = useState<
-    Record<string, { health: string; seeders: number; leechers: number }>
-  >({});
-  const [checkingHealth, setCheckingHealth] = useState<string | null>(null);
-  // 推送 OpenList 离线下载（移植自 MoonTVPlus）
-  const [pushingDownload, setPushingDownload] = useState<string | null>(null);
-  const [pushedIds, setPushedIds] = useState<Record<string, boolean>>({});
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const isLoadingMoreRef = useRef(false);
 
@@ -194,82 +186,6 @@ export default function AcgSearch({
     }
   };
 
-  // 种子健康检查：Tracker scrape 测活（移植自 MoonTVPlus）
-  const checkHealth = async (item: AcgSearchItem) => {
-    const target = item.torrentUrl || item.link;
-    if (!target || checkingHealth) return;
-    setCheckingHealth(item.guid);
-    try {
-      const res = await fetch('/api/acg/health', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: target }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '测活失败');
-      setHealthMap((prev) => ({
-        ...prev,
-        [item.guid]: {
-          health: data.health,
-          seeders: data.seeders ?? 0,
-          leechers: data.leechers ?? 0,
-        },
-      }));
-    } catch (err) {
-      onError?.(err instanceof Error ? err.message : '测活失败');
-    } finally {
-      setCheckingHealth(null);
-    }
-  };
-
-  // 健康等级徽章样式
-  const healthBadgeClass = (health: string) => {
-    switch (health) {
-      case 'good':
-        return 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300';
-      case 'ok':
-        return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300';
-      case 'risk':
-        return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
-      default:
-        return 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400';
-    }
-  };
-
-  const healthBadgeText = (health: string, seeders: number, leechers: number) => {
-    switch (health) {
-      case 'good':
-        return `健康 做种${seeders} 下载${leechers}`;
-      case 'ok':
-        return `一般 做种${seeders} 下载${leechers}`;
-      case 'risk':
-        return `风险 做种${seeders} 下载${leechers}`;
-      default:
-        return '未知';
-    }
-  };
-
-  // 推送到 OpenList 离线下载（移植自 MoonTVPlus，仅管理员可用）
-  const pushToOpenList = async (item: AcgSearchItem) => {
-    const target = item.torrentUrl || item.link;
-    if (!target || pushingDownload) return;
-    setPushingDownload(item.guid);
-    try {
-      const res = await fetch('/api/acg/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: target, name: item.title, tool: 'aria2' }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '推送失败');
-      setPushedIds((prev) => ({ ...prev, [item.guid]: true }));
-    } catch (err) {
-      onError?.(err instanceof Error ? err.message : '推送失败');
-    } finally {
-      setPushingDownload(null);
-    }
-  };
-
   if (loading && allItems.length === 0) {
     return (
       <div className='flex items-center justify-center py-12'>
@@ -400,60 +316,6 @@ export default function AcgSearch({
                   <>
                     <Copy className='h-4 w-4' />
                     <span>复制链接</span>
-                  </>
-                )}
-              </button>
-              {/* 种子健康检查（移植自 MoonTVPlus） */}
-              <button
-                onClick={() => checkHealth(item)}
-                disabled={checkingHealth === item.guid || (!item.torrentUrl && !item.link)}
-                className='flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-blue-600 text-white text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors'
-                title='Tracker 测活，检查种子健康度'
-              >
-                {checkingHealth === item.guid ? (
-                  <>
-                    <Loader2 className='h-4 w-4 animate-spin' />
-                    <span>测活中</span>
-                  </>
-                ) : (
-                  <>
-                    <Activity className='h-4 w-4' />
-                    <span>健康检查</span>
-                  </>
-                )}
-              </button>
-              {healthMap[item.guid] && (
-                <span
-                  className={`px-2 py-1 rounded-md text-xs font-medium ${healthBadgeClass(healthMap[item.guid].health)}`}
-                >
-                  {healthBadgeText(
-                    healthMap[item.guid].health,
-                    healthMap[item.guid].seeders,
-                    healthMap[item.guid].leechers
-                  )}
-                </span>
-              )}
-              {/* 推送到 OpenList 离线下载（移植自 MoonTVPlus，仅管理员可用） */}
-              <button
-                onClick={() => pushToOpenList(item)}
-                disabled={pushingDownload === item.guid || (!item.torrentUrl && !item.link)}
-                className='flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-purple-600 text-white text-sm hover:bg-purple-700 disabled:opacity-50 transition-colors'
-                title='推送到 OpenList 离线下载（需要管理员权限）'
-              >
-                {pushingDownload === item.guid ? (
-                  <>
-                    <Loader2 className='h-4 w-4 animate-spin' />
-                    <span>推送中</span>
-                  </>
-                ) : pushedIds[item.guid] ? (
-                  <>
-                    <Check className='h-4 w-4' />
-                    <span>已推送</span>
-                  </>
-                ) : (
-                  <>
-                    <HardDriveDownload className='h-4 w-4' />
-                    <span>离线下载</span>
                   </>
                 )}
               </button>

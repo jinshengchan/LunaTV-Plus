@@ -36,9 +36,6 @@ const RouteWarmup = nextDynamic(() => import('../components/RouteWarmup'));
 const DownloadPanel = nextDynamic(() =>
   import('../components/download/DownloadPanel').then((m) => m.DownloadPanel)
 );
-const OfflineDownloadPanelHost = nextDynamic(() =>
-  import('../components/OfflineDownloadPanelHost').then((m) => m.OfflineDownloadPanelHost)
-);
 const ChatFloatingWindow = nextDynamic(() => import('../components/watch-room/ChatFloatingWindow'));
 
 const inter = Inter({ subsets: ['latin'] });
@@ -229,7 +226,6 @@ export default async function RootLayout({
                   </SiteProvider>
                   <Suspense fallback={null}>
                     <DownloadPanel />
-                    <OfflineDownloadPanelHost />
                     <ChatFloatingWindow />
                   </Suspense>
                 </WatchRoomProvider>

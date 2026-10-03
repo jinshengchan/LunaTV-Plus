@@ -61,4 +61,4 @@ package-lock.json
 crash-reports.jsonl
 
 # sqlite data
-data/.push_state.json
+data/

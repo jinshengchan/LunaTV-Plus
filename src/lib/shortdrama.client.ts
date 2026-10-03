@@ -217,7 +217,7 @@ export async function searchShortDramas(
 }
 
 // 使用备用API解析单集视频
-export async function parseWithAlternativeApi(
+async function parseWithAlternativeApi(
   dramaName: string,
   episode: number,
   alternativeApiUrl: string

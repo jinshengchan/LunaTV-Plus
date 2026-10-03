@@ -7,7 +7,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Hls from 'hls.js';
-import { Heart, ChevronUp, Download, X, CloudDownload } from 'lucide-react';
+import { Heart, ChevronUp, Download, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 
@@ -26,9 +26,6 @@ import SkipController, { SkipSettingsButton } from '@/components/SkipController'
 import VideoCard from '@/components/VideoCard';
 import CommentSection from '@/components/play/CommentSection';
 import DownloadButtons from '@/components/play/DownloadButtons';
-import ExternalPlayerMenu from '@/components/play/ExternalPlayerMenu';
-import OfflineDownloadEpisodeSelector from '@/components/OfflineDownloadEpisodeSelector';
-import { openOfflineDownloadPanel } from '@/components/OfflineDownloadPanelHost';
 import FavoriteButton from '@/components/play/FavoriteButton';
 import NetDiskButton from '@/components/play/NetDiskButton';
 import CollapseButton from '@/components/play/CollapseButton';
@@ -302,11 +299,6 @@ function PlayPageClient() {
 
   // 下载选集面板状态
   const [showDownloadEpisodeSelector, setShowDownloadEpisodeSelector] = useState(false);
-  // 服务器离线下载选集面板（移植自 MoonTVPlus）
-  const [showOfflineDownloadSelector, setShowOfflineDownloadSelector] = useState(false);
-  const offlineDownloadEnabled =
-    typeof process !== 'undefined' &&
-    process.env.NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD === 'true';
 
   // 下载功能启用状态
   const [downloadEnabled, setDownloadEnabled] = useState(true);
@@ -376,7 +368,6 @@ function PlayPageClient() {
     weightsCache: Map<string, any>;
     isActive: boolean;
     renderLoopActive: boolean;
-    gpuErrorCount: number;
   }>({
     instance: null,
     gpu: null,
@@ -384,7 +375,6 @@ function PlayPageClient() {
     weightsCache: new Map(),
     isActive: false,
     renderLoopActive: false,
-    gpuErrorCount: 0,
   });
 
   const websrEnabledRef = useRef(websrEnabled);
@@ -2493,48 +2483,15 @@ function PlayPageClient() {
         throw new Error('无法获取视频尺寸');
       }
 
-      // 初始化 GPU：每次都创建新 device。
-      // 注意：WebSR 实例 destroy 时会连带 destroy 掉传入的 device，
-      // 且 WebGPU 的错误（校验失败/设备丢失）都是异步上报、不会抛异常，
-      // 因此绝不能复用旧 device，否则会静默黑屏。
-      const { default: WebSR } = await import('@websr/websr');
-      const gpu = await WebSR.initWebGPU();
-      if (!gpu) {
-        throw new Error('WebGPU 初始化失败');
+      // 初始化 GPU（复用已有的或创建新的）
+      if (!websrRef.current.gpu) {
+        const { default: WebSR } = await import('@websr/websr');
+        const gpu = await WebSR.initWebGPU();
+        if (!gpu) {
+          throw new Error('WebGPU 初始化失败');
+        }
+        websrRef.current.gpu = gpu;
       }
-      websrRef.current.gpu = gpu;
-      websrRef.current.gpuErrorCount = 0;
-
-      // 监听 WebGPU 异步错误与设备丢失：失败时自动关闭超分并提示，
-      // 避免留下一块黑画布（错误不会抛异常，render 的 catch 捕获不到）
-      gpu.lost.then((info: GPUDeviceLostInfo) => {
-        const ref = websrRef.current;
-        // 主动 destroy 也会触发 lost；只有管线仍活跃时才是真的意外丢失
-        if (!ref.isActive) return;
-        console.error('WebSR GPU 设备丢失:', info.message);
-        ref.gpu = null;
-        setWebsrEnabled(false);
-        try { localStorage.setItem('websr_enabled', 'false'); } catch { /* ignore */ }
-        void destroyWebSR();
-        if (artPlayerRef.current) {
-          artPlayerRef.current.notice.show = '超分失败：GPU 设备丢失，已自动关闭';
-        }
-      });
-      gpu.onuncapturederror = (ev: GPUUncapturedErrorEvent) => {
-        const ref = websrRef.current;
-        ref.gpuErrorCount += 1;
-        console.warn(`WebSR GPU 未捕获错误 (${ref.gpuErrorCount}):`, (ev.error as Error)?.message || ev.error);
-        if (ref.gpuErrorCount >= 8 && ref.isActive) {
-          ref.isActive = false; // 防止重复触发
-          ref.gpu = null;
-          setWebsrEnabled(false);
-          try { localStorage.setItem('websr_enabled', 'false'); } catch { /* ignore */ }
-          void destroyWebSR();
-          if (artPlayerRef.current) {
-            artPlayerRef.current.notice.show = '超分失败：当前设备不支持，已自动关闭';
-          }
-        }
-      };
 
       // 创建 canvas
       const canvas = document.createElement('canvas');
@@ -2573,7 +2530,8 @@ function PlayPageClient() {
         websrRef.current.weightsCache.set(weightFile, weights);
       }
 
-      // 创建 WebSR 实例（WebSR 已在上面导入）
+      // 创建 WebSR 实例
+      const { default: WebSR } = await import('@websr/websr');
       const networkName = getWebsrNetworkName(websrModeRef.current, websrNetworkSizeRef.current);
 
       const websr = new WebSR({
@@ -2590,23 +2548,8 @@ function PlayPageClient() {
 
       // 使用 requestVideoFrameCallback 手动渲染循环
       const renderFrame = () => {
-        const ref = websrRef.current;
-        if (!ref.renderLoopActive || !ref.instance) return;
-        // HLS 自适应切换清晰度时视频分辨率会变：此时整条重建管线
-        //（库内 updateResolution 已在上面禁用，见注释）
-        const vw = video.videoWidth, vh = video.videoHeight;
-        const instRes = ref.instance.resolution as { width: number; height: number } | undefined;
-        if (vw && vh && instRes && (vw !== instRes.width || vh !== instRes.height)) {
-          console.log(`WebSR: 分辨率变化 ${instRes.width}x${instRes.height} -> ${vw}x${vh}，重建管线`);
-          void (async () => {
-            await destroyWebSR();
-            if (websrEnabledRef.current) {
-              await initWebSR();
-            }
-          })();
-          return;
-        }
-        ref.instance.render(video).then(() => {
+        if (!websrRef.current.renderLoopActive || !websrRef.current.instance) return;
+        websrRef.current.instance.render(video).then(() => {
           if (websrRef.current.renderLoopActive) {
             video.requestVideoFrameCallback(renderFrame);
           }
@@ -2622,11 +2565,6 @@ function PlayPageClient() {
       // 隐藏原始视频
       video.style.opacity = '0';
       video.style.position = 'absolute';
-
-      // 库内的 updateResolution 有 bug：它会 destroy 掉传入的 GPUDevice，
-      // 然后用同一个已销毁的 device 重新初始化，导致 HLS 切换清晰度后静默黑屏。
-      // 这里禁用它，改由下面的渲染循环检测分辨率变化后整条重建（用全新的 device）。
-      (websr as any).updateResolution = () => {};
 
       const modeText = websrModeRef.current === 'upscale' ? '2x超分' : '降噪';
       const sizeText = { s: '快速', m: '标准', l: '高质' }[websrNetworkSizeRef.current];
@@ -2653,11 +2591,6 @@ function PlayPageClient() {
       websrRef.current.canvas = null;
       websrRef.current.instance = null;
       websrRef.current.isActive = false;
-      // 本次新建但未投入使用的 GPUDevice 直接销毁，避免泄漏
-      if (websrRef.current.gpu) {
-        try { websrRef.current.gpu.destroy(); } catch { /* ignore */ }
-        websrRef.current.gpu = null;
-      }
     }
   };
 
@@ -2672,9 +2605,6 @@ function PlayPageClient() {
         await ref.instance.destroy();
         ref.instance = null;
       }
-      // instance.destroy() 会连带 destroy 掉 GPUDevice，该引用已失效必须置空，
-      // 否则下次 init 会复用已销毁的 device 导致静默黑屏
-      ref.gpu = null;
 
       if (ref.canvas && ref.canvas.parentNode?.contains(ref.canvas)) {
         ref.canvas.parentNode.removeChild(ref.canvas);
@@ -2958,59 +2888,58 @@ function PlayPageClient() {
     }
   }, [detail, currentEpisodeIndex]);
 
-  const fetchSourceDetail = async (
-    source: string,
-    id: string,
-    title?: string
-  ): Promise<SearchResult[]> => {
-    try {
-      let detailResponse;
-
-      // 判断是否为短剧源
-      if (source === 'shortdrama') {
-        // 传递 title 参数以支持备用API fallback
-        // 优先使用 URL 参数的 title，因为 videoTitleRef 可能还未初始化
-        const dramaTitle = searchParams.get('title') || videoTitleRef.current || '';
-        const titleParam = dramaTitle ? `&name=${encodeURIComponent(dramaTitle)}` : '';
-        detailResponse = await fetch(
-          `/api/shortdrama/detail?id=${id}&episode=1${titleParam}`
-        );
-      } else {
-        // 所有其他源（包括 Emby）统一使用 /api/detail
-        // 添加 title 参数用于搜索匹配
-        const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
-        detailResponse = await fetch(
-          `/api/detail?source=${source}&id=${id}${titleParam}`
-        );
-      }
-
-      if (!detailResponse.ok) {
-        throw new Error('获取视频详情失败');
-      }
-
-      const detailData = (await detailResponse.json()) as SearchResult;
-
-      // 对于短剧源，检查 title 和 poster 是否有效
-      if (source === 'shortdrama') {
-        if (!detailData.title || !detailData.poster) {
-          throw new Error('短剧源数据不完整（缺少标题或海报）');
-        }
-      }
-
-      // 注意：不检查episodes是否为空，因为有些源可能需要后续处理
-      // 即使episodes为空，也返回数据，让调用方决定如何处理
-
-      return [detailData];
-    } catch (err) {
-      console.error('获取视频详情失败:', err);
-      return [];
-    } finally {
-      setSourceSearchLoading(false);
-    }
-  };
-
   // 进入页面时直接获取全部源信息
   useEffect(() => {
+    const fetchSourceDetail = async (
+      source: string,
+      id: string,
+      title?: string
+    ): Promise<SearchResult[]> => {
+      try {
+        let detailResponse;
+
+        // 判断是否为短剧源
+        if (source === 'shortdrama') {
+          // 传递 title 参数以支持备用API fallback
+          // 优先使用 URL 参数的 title，因为 videoTitleRef 可能还未初始化
+          const dramaTitle = searchParams.get('title') || videoTitleRef.current || '';
+          const titleParam = dramaTitle ? `&name=${encodeURIComponent(dramaTitle)}` : '';
+          detailResponse = await fetch(
+            `/api/shortdrama/detail?id=${id}&episode=1${titleParam}`
+          );
+        } else {
+          // 所有其他源（包括 Emby）统一使用 /api/detail
+          // 添加 title 参数用于搜索匹配
+          const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
+          detailResponse = await fetch(
+            `/api/detail?source=${source}&id=${id}${titleParam}`
+          );
+        }
+
+        if (!detailResponse.ok) {
+          throw new Error('获取视频详情失败');
+        }
+
+        const detailData = (await detailResponse.json()) as SearchResult;
+
+        // 对于短剧源，检查 title 和 poster 是否有效
+        if (source === 'shortdrama') {
+          if (!detailData.title || !detailData.poster) {
+            throw new Error('短剧源数据不完整（缺少标题或海报）');
+          }
+        }
+
+        // 注意：不检查episodes是否为空，因为有些源可能需要后续处理
+        // 即使episodes为空，也返回数据，让调用方决定如何处理
+
+        return [detailData];
+      } catch (err) {
+        console.error('获取视频详情失败:', err);
+        return [];
+      } finally {
+        setSourceSearchLoading(false);
+      }
+    };
     const fetchSourcesData = async (query: string): Promise<SearchResult[]> => {
       // 使用智能搜索变体获取全部源信息
       try {
@@ -6140,107 +6069,6 @@ function PlayPageClient() {
     loadAndInit();
   }, [Hls, videoUrl, loading, blockAdEnabled]);
 
-  // ===== 自动换源：单个源加载 20 秒不出画面（无首帧）则自动切下一个源 =====
-  const AUTO_SWITCH_TIMEOUT_MS = 20000;
-  const autoSwitchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autoSwitchTriedRef = useRef<Set<string>>(new Set()); // 本集已试过且失败的 source:id
-  const autoSwitchingRef = useRef(false);
-
-  const clearAutoSwitchTimer = () => {
-    if (autoSwitchTimerRef.current) {
-      clearTimeout(autoSwitchTimerRef.current);
-      autoSwitchTimerRef.current = null;
-    }
-  };
-
-  // 换视频/换集时重置已试记录（同集内自动换源不重置，避免重复试坏源）
-  useEffect(() => {
-    autoSwitchTriedRef.current.clear();
-  }, [currentId, currentEpisodeIndex]);
-
-  const checkAndAutoSwitchSource = async (graceExtended = false) => {
-    const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
-    if (!video) {
-      // 播放器还没建好：给 5 秒宽限再查一次；仍无播放器则按无画面处理
-      if (!graceExtended) {
-        autoSwitchTimerRef.current = setTimeout(() => {
-          autoSwitchTimerRef.current = null;
-          void checkAndAutoSwitchSource(true);
-        }, 5000);
-        return;
-      }
-    } else if (video.readyState >= 2) {
-      // 已有首帧：本源可用，清空失败记录
-      autoSwitchTriedRef.current.clear();
-      return;
-    }
-    if (autoSwitchingRef.current || isSourceChangingRef.current) return;
-
-    const list = availableSourcesRef.current || [];
-    const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
-    autoSwitchTriedRef.current.add(curKey);
-
-    // 依次验证候选源：详情能解析且有集数才切，
-    // 避免切到无效源后落到"未找到匹配结果"报错屏
-    let next: SearchResult | undefined;
-    for (const s of list) {
-      const key = `${s.source}:${s.id}`;
-      if (autoSwitchTriedRef.current.has(key)) continue;
-      autoSwitchTriedRef.current.add(key);
-      try {
-        const details = await fetchSourceDetail(
-          s.source,
-          s.id,
-          s.title || videoTitleRef.current
-        );
-        if (
-          details.length > 0 &&
-          details[0].episodes &&
-          details[0].episodes.length > 0
-        ) {
-          next = s;
-          break;
-        }
-        console.log(`⏭️ 候选线路 ${s.source_name || s.source} 详情解析失败，跳过`);
-      } catch (err) {
-        console.warn(`⏭️ 候选线路 ${s.source_name || s.source} 验证异常，跳过:`, err);
-      }
-    }
-    if (!next) {
-      autoSwitchTriedRef.current.clear();
-      console.log('⏭️ 所有线路 20 秒内均无画面，停止自动换源');
-      if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = '所有线路均加载超时，请手动切换';
-      }
-      return;
-    }
-    autoSwitchingRef.current = true;
-    try {
-      console.log(
-        `⏭️ 当前线路 20 秒无画面，自动切换: ${currentSourceRef.current} -> ${next.source_name || next.source}`
-      );
-      if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = '当前线路无响应，自动切换线路…';
-      }
-      await handleSourceChange(next.source, next.id, next.title);
-    } catch (err) {
-      console.warn('自动换源失败:', err);
-    } finally {
-      autoSwitchingRef.current = false;
-    }
-  };
-
-  // videoUrl 变化（换源/换集开始加载）→ 启动 20 秒看门狗
-  useEffect(() => {
-    clearAutoSwitchTimer();
-    if (!videoUrl) return;
-    autoSwitchTimerRef.current = setTimeout(() => {
-      autoSwitchTimerRef.current = null;
-      void checkAndAutoSwitchSource();
-    }, AUTO_SWITCH_TIMEOUT_MS);
-    return clearAutoSwitchTimer;
-  }, [videoUrl]);
-
   // 动态更新音轨控制按钮
   useEffect(() => {
     if (!artPlayerRef.current?.controls?.update) return;
@@ -6401,25 +6229,6 @@ function PlayPageClient() {
               onDownloadClick={() => setShowDownloadEpisodeSelector(true)}
               onDownloadPanelClick={() => setShowDownloadPanel(true)}
             />
-
-            {/* 外部播放器菜单（移植自 MoonTVPlus） */}
-            {videoUrl && (
-              <ExternalPlayerMenu videoUrl={videoUrl} title={videoTitle} />
-            )}
-
-            {/* 服务器离线下载（移植自 MoonTVPlus，需服务端开启） */}
-            {offlineDownloadEnabled && (
-              <button
-                onClick={() => setShowOfflineDownloadSelector(true)}
-                className='flex group relative items-center gap-1.5 sm:gap-2 px-2.5 sm:px-4 py-1.5 sm:py-2 min-h-[40px] sm:min-h-[44px] rounded-2xl bg-linear-to-br from-white/90 via-white/80 to-white/70 hover:from-white hover:via-white/95 hover:to-white/90 dark:from-gray-800/90 dark:via-gray-800/80 dark:to-gray-800/70 dark:hover:from-gray-800 dark:hover:via-gray-800/95 dark:hover:to-gray-800/90 backdrop-blur-md border border-white/60 dark:border-gray-700/60 shadow-[0_2px_8px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.25)] dark:shadow-[0_2px_8px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.1)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.3)] dark:hover:shadow-[0_4px_12px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.15)] hover:scale-105 active:scale-95 transition-all duration-300 overflow-hidden'
-                title='服务器离线下载（需管理员权限）'
-              >
-                <CloudDownload className='relative z-10 w-3.5 sm:w-4 h-3.5 sm:h-4 text-gray-600 dark:text-gray-400' />
-                <span className='relative z-10 hidden sm:inline text-xs font-medium text-gray-600 dark:text-gray-300'>
-                  离线下载
-                </span>
-              </button>
-            )}
 
             {/* 折叠控制按钮 - 仅在 lg 及以上屏幕显示 */}
             <CollapseButton
@@ -7169,93 +6978,6 @@ function PlayPageClient() {
         }
       }}
       />
-
-      {/* 服务器离线下载选集面板（移植自 MoonTVPlus） */}
-      {offlineDownloadEnabled && (
-        <OfflineDownloadEpisodeSelector
-          isOpen={showOfflineDownloadSelector}
-          onClose={() => setShowOfflineDownloadSelector(false)}
-          totalEpisodes={detail?.episodes?.length || 1}
-          episodesTitles={detail?.episodes_titles || []}
-          videoTitle={videoTitle || '视频'}
-          currentEpisodeIndex={currentEpisodeIndex}
-          enableOfflineDownload
-          hasOfflinePermission
-          onDownload={async (episodeIndexes, offlineMode) => {
-            if (!offlineMode) {
-              toast.info('浏览器下载请使用下载按钮');
-              return;
-            }
-            let successCount = 0;
-            let skipped = 0;
-            let permissionDenied = false;
-            for (const episodeIndex of episodeIndexes) {
-              const episodeUrl =
-                detail?.episodes && detail.episodes.length > 0
-                  ? detail.episodes[episodeIndex]
-                  : videoUrl;
-              if (
-                !episodeUrl ||
-                episodeUrl.startsWith('shortdrama:') ||
-                !episodeUrl.includes('.m3u8')
-              ) {
-                skipped++;
-                continue;
-              }
-              try {
-                const res = await fetch('/api/offline-download', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    source: currentSource,
-                    videoId: currentId,
-                    episodeIndex,
-                    title: `${videoTitle || '视频'}_第${episodeIndex + 1}集`,
-                    m3u8Url: episodeUrl,
-                  }),
-                });
-                const data = await res.json();
-                if (!res.ok) {
-                  if (res.status === 403) permissionDenied = true;
-                  throw new Error(data.error || '创建任务失败');
-                }
-                successCount++;
-              } catch (err) {
-                console.error(`第${episodeIndex + 1}集离线下载任务创建失败:`, err);
-                if (!permissionDenied) {
-                  toast.error('离线下载任务创建失败', {
-                    description: (err as Error).message,
-                    duration: 5000,
-                  });
-                }
-                break;
-              }
-            }
-            if (permissionDenied && successCount === 0) {
-              toast.error('无权限', {
-                description: '服务器离线下载仅管理员可用',
-                duration: 5000,
-              });
-              return;
-            }
-            if (successCount > 0) {
-              toast.success(`已添加 ${successCount} 个离线下载任务`, {
-                description: skipped ? `跳过 ${skipped} 集（仅支持 M3U8）` : undefined,
-                action: {
-                  label: '查看任务',
-                  onClick: () => openOfflineDownloadPanel(),
-                },
-                duration: 5000,
-              });
-            } else if (skipped > 0) {
-              toast.warning('没有可离线下载的剧集', {
-                description: '仅支持 M3U8 格式',
-                duration: 4000,
-              });
-            }
-          }}
-        />
-      )}
     </>
   );
 }

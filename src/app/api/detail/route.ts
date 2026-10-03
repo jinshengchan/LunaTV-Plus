@@ -3,13 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getCacheTime } from '@/lib/config';
 import { getDetailFromApi, searchFromApi } from '@/lib/downstream';
-import { getDbQueryCount, recordRequest, resetDbQueryCount } from '@/lib/performance-monitor';
-import {
-  executeSavedSourceScript,
-  normalizeScriptDetailResult,
-  normalizeScriptSources,
-  parseScriptSourceValue,
-} from '@/lib/source-script';
+import { recordRequest, getDbQueryCount, resetDbQueryCount } from '@/lib/performance-monitor';
 
 export const runtime = 'nodejs';
 
@@ -60,44 +54,6 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json(errorResponse, { status: 400 });
-  }
-
-  // 实验性：视频源脚本（移植自 MoonTVPlus），source 形如 script:<key>:<sourceId>
-  // 必须在 id 格式校验之前处理（脚本 id 可含任意字符）
-  const parsedScriptSource = parseScriptSourceValue(sourceCode);
-  if (parsedScriptSource) {
-    try {
-      const sourcesExecution = await executeSavedSourceScript({
-        key: parsedScriptSource.scriptKey,
-        hook: 'getSources',
-        payload: {},
-      });
-      const sources = normalizeScriptSources(sourcesExecution.result);
-      const sourceInfo = sources.find((item) => item.id === parsedScriptSource.sourceId) || {
-        id: parsedScriptSource.sourceId,
-        name: parsedScriptSource.sourceId,
-      };
-
-      const detailExecution = await executeSavedSourceScript({
-        key: parsedScriptSource.scriptKey,
-        hook: 'detail',
-        payload: { id, sourceId: parsedScriptSource.sourceId },
-      });
-
-      const normalized = normalizeScriptDetailResult({
-        source: sourceCode,
-        scriptKey: parsedScriptSource.scriptKey,
-        scriptName: detailExecution.meta?.name || parsedScriptSource.scriptKey,
-        sourceId: parsedScriptSource.sourceId,
-        sourceName: sourceInfo.name,
-        detailId: id,
-        result: detailExecution.result,
-      });
-
-      return NextResponse.json(normalized);
-    } catch (error) {
-      return NextResponse.json({ error: (error as Error).message }, { status: 500 });
-    }
   }
 
   if (!/^[\w-]+$/.test(id)) {

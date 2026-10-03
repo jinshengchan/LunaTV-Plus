@@ -2,9 +2,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites } from '@/lib/config';
-import { listEnabledSourceScripts } from '@/lib/source-script';
+import { getAuthInfoFromCookie } from '@/lib/auth';
 
 export const runtime = 'nodejs';
 
@@ -21,14 +20,7 @@ export async function GET(request: NextRequest) {
   try {
     const apiSites = await getAvailableApiSites(authInfo.username);
 
-    // 实验性：视频源脚本（移植自 MoonTVPlus），以 script: 前缀标识
-    const scriptSites = (await listEnabledSourceScripts()).map((item) => ({
-      key: `script:${item.key}`,
-      name: item.name,
-      script: true,
-    }));
-
-    return NextResponse.json([...apiSites, ...scriptSites]);
+    return NextResponse.json(apiSites);
   } catch (error) {
     return NextResponse.json({ error: '获取资源失败' }, { status: 500 });
   }

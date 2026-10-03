@@ -30,13 +30,11 @@ import {
   CheckCircle,
   ChevronDown,
   ChevronUp,
-  Cloud,
   Database,
   Download,
   ExternalLink,
   FileText,
   FolderOpen,
-  HardDrive,
   Layout,
   Settings,
   Shield,
@@ -72,8 +70,6 @@ import BilibiliConfig from '@/components/BilibiliConfig';
 // import ShortDramaConfig from '@/components/ShortDramaConfig'; // 暂时隐藏短剧API配置
 import DownloadConfig from '@/components/OfflineDownloadConfig';
 import EmbyConfig from '@/components/EmbyConfig';
-import OpenListConfig from '@/components/OpenListConfig';
-import XiaoyaConfig from '@/components/XiaoyaConfig';
 import CustomAdFilterConfig from '@/components/CustomAdFilterConfig';
 import WatchRoomConfig from '@/components/WatchRoomConfig';
 import HomePageConfig from '@/components/HomePageConfig';
@@ -8339,36 +8335,6 @@ function AdminPageClient() {
               onToggle={() => toggleTab('downloadConfig')}
             >
               <DownloadConfig config={config} refreshConfig={fetchConfig} />
-            </CollapsibleTab>
-
-            {/* OpenList 配置标签（移植自 MoonTVPlus） */}
-            <CollapsibleTab
-              title='OpenList 配置'
-              icon={
-                <HardDrive
-                  size={20}
-                  className='text-orange-600 dark:text-orange-400'
-                />
-              }
-              isExpanded={expandedTabs.openlistConfig}
-              onToggle={() => toggleTab('openlistConfig')}
-            >
-              <OpenListConfig config={config} refreshConfig={fetchConfig} />
-            </CollapsibleTab>
-
-            {/* 小雅配置标签（移植自 MoonTVPlus） */}
-            <CollapsibleTab
-              title='小雅配置'
-              icon={
-                <Cloud
-                  size={20}
-                  className='text-sky-600 dark:text-sky-400'
-                />
-              }
-              isExpanded={expandedTabs.xiaoyaConfig}
-              onToggle={() => toggleTab('xiaoyaConfig')}
-            >
-              <XiaoyaConfig config={config} refreshConfig={fetchConfig} />
             </CollapsibleTab>
 
             {/* 自定义去广告标签 */}
