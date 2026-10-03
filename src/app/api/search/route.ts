@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any,no-console */
+/* eslint-disable no-console */
 
 import { NextRequest, NextResponse } from 'next/server';
 
@@ -6,7 +6,13 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 import { generateSearchVariants } from '@/lib/downstream';
-import { recordRequest, getDbQueryCount, resetDbQueryCount } from '@/lib/performance-monitor';
+import { getDbQueryCount, recordRequest, resetDbQueryCount } from '@/lib/performance-monitor';
+import {
+  executeSavedSourceScript,
+  listEnabledSourceScripts,
+  normalizeScriptSearchResults,
+  normalizeScriptSources,
+} from '@/lib/source-script';
 import {
   buildResolutionFilterFromSearchParams,
   filterSearchResultsByResolution,
@@ -94,8 +100,46 @@ export async function GET(request: NextRequest) {
     })
   );
 
+  // 实验性：视频源脚本（移植自 MoonTVPlus）
+  const scriptSummaries = await listEnabledSourceScripts();
+  const scriptPromises = scriptSummaries.map((script) =>
+    Promise.race([
+      (async () => {
+        const sourcesExecution = await executeSavedSourceScript({
+          key: script.key,
+          hook: 'getSources',
+          payload: {},
+        });
+        const sources = normalizeScriptSources(sourcesExecution.result);
+        const perSource = await Promise.all(
+          sources.map(async (source) => {
+            const execution = await executeSavedSourceScript({
+              key: script.key,
+              hook: 'search',
+              payload: { keyword: query, page: 1, sourceId: source.id },
+            });
+            return normalizeScriptSearchResults({
+              scriptKey: script.key,
+              scriptName: script.name,
+              sourceId: source.id,
+              sourceName: source.name,
+              result: execution.result,
+            });
+          })
+        );
+        return perSource.flat();
+      })(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`${script.name} timeout`)), 20000)
+      ),
+    ]).catch((err) => {
+      console.warn(`脚本搜索失败 ${script.name}:`, (err as Error).message);
+      return [];
+    })
+  );
+
   try {
-    const results = await Promise.allSettled(searchPromises);
+    const results = await Promise.allSettled([...searchPromises, ...scriptPromises]);
     const successResults = results
       .filter((result) => result.status === 'fulfilled')
       .map((result) => (result as PromiseFulfilledResult<any>).value);
