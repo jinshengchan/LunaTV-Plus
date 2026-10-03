@@ -120,7 +120,6 @@
 | `NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD` | 空（关闭） | 服务器离线下载总开关 |
 | `OFFLINE_DOWNLOAD_DIR` | `<cwd>/data/offline-download` | 服务端下载目录（含 tasks.json） |
 | `OFFLINE_DOWNLOAD_PROXY` | 空（直连） | 服务端下载代理（**当前未实际接入代理实现**） |
-| `VIDEOINFO_CACHE_MINUTES` | `1440`（1 天） | OpenList videoinfo 内存缓存时长（分钟） |
 
 > LunaTV 根目录无 `.env.example`（配置为 DB 持久化），故环境变量在此集中说明。
 > 如需代理能力，需安装 `https-proxy-agent` 并在 `src/lib/server-offline-downloader.ts` 的

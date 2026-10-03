@@ -231,7 +231,7 @@ pnpm dev
 
 本项目在开发过程中参考了以下优秀开源项目的设计思路和实现方案：
 
-- **[MoonTVPlus](https://github.com/mtvpls/MoonTVPlus)** — 观影室同步播放、移动端优化等功能实现参考
+- **[MoonTVPlus](https://github.com/mtvpls/MoonTVPlus)** — 观影室同步播放、移动端优化等功能实现参考；另有以下功能直接移植自该项目（MIT 协议，移植文件头部保留原作者署名）：外部播放器跳转、磁力种子健康检查（Tracker 测活）、OpenList/小雅私人影库集成、磁力推送 OpenList 离线下载、服务器离线下载（断点续传）、视频源脚本引擎（实验性）。详见 [PORTING_NOTES.md](./PORTING_NOTES.md)。
 - **[DecoTV](https://github.com/Decohererk/DecoTV)** — TVBox 安全策略、性能优化、UI 设计等实现参考
 
 感谢这些项目及其作者的开源贡献和优秀实现！
