@@ -3,7 +3,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getCacheTime, getConfig } from '@/lib/config';
-import { parseShortDramaEpisode } from '@/lib/shortdrama.client';
+import { parseWithAlternativeApi } from '@/lib/shortdrama.client';
+import { fetchShortDramaVod } from '@/lib/shortdrama.server';
 import { recordRequest, getDbQueryCount, resetDbQueryCount } from '@/lib/performance-monitor';
 
 // 标记为动态路由
@@ -73,17 +74,52 @@ export async function GET(request: NextRequest) {
       alternativeApiUrl = undefined;
     }
 
-    // 解析视频，默认使用代理，如果提供了剧名且配置了备用API则自动fallback
-    const result = await parseShortDramaEpisode(
-      videoId,
-      episodeNum,
-      true,
-      name || undefined,
-      alternativeApiUrl
-    );
+    // 解析视频：优先备用 API（已配置时），否则服务端直调上游资源站。
+    // 注意：不再调用 parseShortDramaEpisode——它内部用相对路径 fetch 本路由，
+    // 服务端调用会导致循环调用 + Failed to parse URL。
+    let url = '';
+    let parsedUrl = '';
+    let proxyUrl = '';
+    let title = '';
+    let totalEpisodes = 1;
 
-    if (result.code !== 0) {
-      const errorResponse = { error: result.msg || '解析失败' };
+    if (name && alternativeApiUrl) {
+      try {
+        const altResult = await parseWithAlternativeApi(
+          name,
+          episodeNum,
+          alternativeApiUrl
+        );
+        if (altResult.code === 0 && altResult.data) {
+          const ep = altResult.data.episode;
+          parsedUrl = ep?.parsedUrl || altResult.data.parsedUrl || '';
+          proxyUrl = altResult.data.proxyUrl || '';
+          url = proxyUrl || parsedUrl;
+          title = altResult.data.videoName || '';
+          totalEpisodes = altResult.data.totalEpisodes || 1;
+        }
+      } catch (altErr) {
+        console.warn('[shortdrama/parse] 备用 API 失败，fallback 到上游资源站:', altErr);
+      }
+    }
+
+    if (!url) {
+      const vod = await fetchShortDramaVod(videoId);
+      if (vod && vod.episodeUrls.length > 0) {
+        // episode 为播放页传来的 0-based 分集索引，钳制到有效范围
+        const idx = Math.min(
+          Math.max(episodeNum, 0),
+          vod.episodeUrls.length - 1
+        );
+        parsedUrl = vod.episodeUrls[idx] || '';
+        url = parsedUrl;
+        title = vod.vodName;
+        totalEpisodes = vod.episodeUrls.length;
+      }
+    }
+
+    if (!url) {
+      const errorResponse = { error: '解析失败' };
       const responseSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
 
       recordRequest({
@@ -102,17 +138,13 @@ export async function GET(request: NextRequest) {
     }
 
     // 返回视频URL，优先使用代理URL避免CORS问题
-    const episodeData = result.data?.episode;
-    const parsedUrl = episodeData?.parsedUrl || result.data!.parsedUrl || '';
-    const proxyUrl = result.data!.proxyUrl || '';
-
     const response = {
       url: proxyUrl || parsedUrl, // 优先使用代理URL
       originalUrl: parsedUrl,
       proxyUrl: proxyUrl,
-      title: result.data!.videoName || '',
-      episode: result.data!.currentEpisode || episodeNum,
-      totalEpisodes: result.data!.totalEpisodes || 1,
+      title: title,
+      episode: episodeNum,
+      totalEpisodes: totalEpisodes,
     };
 
     // 设置与豆瓣一致的缓存策略
