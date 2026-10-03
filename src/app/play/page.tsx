@@ -6139,6 +6139,83 @@ function PlayPageClient() {
     loadAndInit();
   }, [Hls, videoUrl, loading, blockAdEnabled]);
 
+  // ===== 自动换源：单个源加载 20 秒不出画面（无首帧）则自动切下一个源 =====
+  const AUTO_SWITCH_TIMEOUT_MS = 20000;
+  const autoSwitchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSwitchTriedRef = useRef<Set<string>>(new Set()); // 本集已试过且失败的 source:id
+  const autoSwitchingRef = useRef(false);
+
+  const clearAutoSwitchTimer = () => {
+    if (autoSwitchTimerRef.current) {
+      clearTimeout(autoSwitchTimerRef.current);
+      autoSwitchTimerRef.current = null;
+    }
+  };
+
+  // 换视频/换集时重置已试记录（同集内自动换源不重置，避免重复试坏源）
+  useEffect(() => {
+    autoSwitchTriedRef.current.clear();
+  }, [currentId, currentEpisodeIndex]);
+
+  const checkAndAutoSwitchSource = async (graceExtended = false) => {
+    const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
+    if (!video) {
+      // 播放器还没建好：给 5 秒宽限再查一次；仍无播放器则按无画面处理
+      if (!graceExtended) {
+        autoSwitchTimerRef.current = setTimeout(() => {
+          autoSwitchTimerRef.current = null;
+          void checkAndAutoSwitchSource(true);
+        }, 5000);
+        return;
+      }
+    } else if (video.readyState >= 2) {
+      // 已有首帧：本源可用，清空失败记录
+      autoSwitchTriedRef.current.clear();
+      return;
+    }
+    if (autoSwitchingRef.current || isSourceChangingRef.current) return;
+
+    const list = availableSourcesRef.current || [];
+    const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
+    autoSwitchTriedRef.current.add(curKey);
+    const next = list.find(
+      (s) => !autoSwitchTriedRef.current.has(`${s.source}:${s.id}`)
+    );
+    if (!next) {
+      autoSwitchTriedRef.current.clear();
+      console.log('⏭️ 所有线路 20 秒内均无画面，停止自动换源');
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '所有线路均加载超时，请手动切换';
+      }
+      return;
+    }
+    autoSwitchingRef.current = true;
+    try {
+      console.log(
+        `⏭️ 当前线路 20 秒无画面，自动切换: ${currentSourceRef.current} -> ${next.source_name || next.source}`
+      );
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '当前线路无响应，自动切换线路…';
+      }
+      await handleSourceChange(next.source, next.id, next.title);
+    } catch (err) {
+      console.warn('自动换源失败:', err);
+    } finally {
+      autoSwitchingRef.current = false;
+    }
+  };
+
+  // videoUrl 变化（换源/换集开始加载）→ 启动 20 秒看门狗
+  useEffect(() => {
+    clearAutoSwitchTimer();
+    if (!videoUrl) return;
+    autoSwitchTimerRef.current = setTimeout(() => {
+      autoSwitchTimerRef.current = null;
+      void checkAndAutoSwitchSource();
+    }, AUTO_SWITCH_TIMEOUT_MS);
+    return clearAutoSwitchTimer;
+  }, [videoUrl]);
+
   // 动态更新音轨控制按钮
   useEffect(() => {
     if (!artPlayerRef.current?.controls?.update) return;
