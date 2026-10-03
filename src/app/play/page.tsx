@@ -6140,11 +6140,15 @@ function PlayPageClient() {
     loadAndInit();
   }, [Hls, videoUrl, loading, blockAdEnabled]);
 
-  // ===== 自动换源：单个源加载 20 秒不出画面（无首帧）则自动切下一个源 =====
+  // ===== 自动换源：单个源加载 20 秒不出画面（无首帧）则自动切可播放的源 =====
+  // 逻辑：videoUrl 变化时，后台并行探测各源真实可播放性（服务端拉 m3u8 验 #EXTM3U）；
+  // 20 秒无首帧 → 在已探测出可播放的源里按延迟选最快的切换；失败的源同集内不再试。
   const AUTO_SWITCH_TIMEOUT_MS = 20000;
+  const AUTO_PROBE_CONCURRENCY = 6;
   const autoSwitchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSwitchTriedRef = useRef<Set<string>>(new Set()); // 本集已试过且失败的 source:id
   const autoSwitchingRef = useRef(false);
+  const probeCacheRef = useRef<Map<string, { ok: boolean; latency: number }>>(new Map());
 
   const clearAutoSwitchTimer = () => {
     if (autoSwitchTimerRef.current) {
@@ -6153,10 +6157,113 @@ function PlayPageClient() {
     }
   };
 
-  // 换视频/换集时重置已试记录（同集内自动换源不重置，避免重复试坏源）
+  // 换视频/换集时重置已试记录与探测缓存（同集内自动换源不重置，避免重复试坏源）
   useEffect(() => {
     autoSwitchTriedRef.current.clear();
+    probeCacheRef.current.clear();
   }, [currentId, currentEpisodeIndex]);
+
+  const sourceKeyOf = (s: SearchResult) => `${s.source}:${s.id}`;
+
+  /** 取出某源当前集的真实可播放地址（短剧需经解析接口） */
+  const resolveEpisodePlayUrl = async (s: SearchResult): Promise<string | null> => {
+    try {
+      const epIdx = currentEpisodeIndexRef.current ?? 0;
+      let ep: string | undefined;
+      // 搜索结果自带 episodes 则直接用，缺失再调详情接口
+      if (s.episodes?.length) {
+        ep = s.episodes[Math.min(epIdx, s.episodes.length - 1)];
+      } else {
+        const details = await fetchSourceDetail(
+          s.source,
+          s.id,
+          s.title || videoTitleRef.current
+        );
+        if (!details.length || !details[0].episodes?.length) return null;
+        ep =
+          details[0].episodes[
+            Math.min(epIdx, details[0].episodes.length - 1)
+          ];
+      }
+      if (!ep) return null;
+      // 短剧分集形如 shortdrama:{videoId}:{index}，需解析出直链
+      if (ep.startsWith('shortdrama:')) {
+        const [, videoId, indexStr] = ep.split(':');
+        const res = await fetch(
+          `/api/shortdrama/parse?id=${videoId}&episode=${indexStr || '0'}`
+        );
+        if (!res.ok) return null;
+        const data = await res.json();
+        const url = data?.url || '';
+        return /^https?:\/\//i.test(url) ? url : null;
+      }
+      return /^https?:\/\//i.test(ep) ? ep : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /** 探测单个源的可播放性（带缓存）：服务端拉 m3u8 验有效性 */
+  const probeSource = async (
+    s: SearchResult
+  ): Promise<{ ok: boolean; latency: number }> => {
+    const key = sourceKeyOf(s);
+    const cached = probeCacheRef.current.get(key);
+    if (cached) return cached;
+    const fail = { ok: false, latency: 9999 };
+    try {
+      const playUrl = await resolveEpisodePlayUrl(s);
+      if (!playUrl) {
+        probeCacheRef.current.set(key, fail);
+        return fail;
+      }
+      const t0 = performance.now();
+      const res = await fetch(
+        `/api/probe-video?url=${encodeURIComponent(playUrl)}`
+      );
+      const data = await res.json().catch(() => null);
+      const r = {
+        ok: !!(data && data.ok),
+        latency: data && data.ok ? Math.round(performance.now() - t0) : 9999,
+      };
+      probeCacheRef.current.set(key, r);
+      console.log(
+        `⏭️ 探测 ${s.source_name || s.source}: ${r.ok ? `可播 ${r.latency}ms` : '不可播'}`
+      );
+      return r;
+    } catch (err) {
+      console.warn(`⏭️ 探测 ${s.source_name || s.source} 异常:`, err);
+      probeCacheRef.current.set(key, fail);
+      return fail;
+    }
+  };
+
+  /** 后台并行探测一批源（限制并发），fire-and-forget */
+  const probeSourcesInBackground = (sources: SearchResult[]) => {
+    const queue = sources.filter(
+      (s) =>
+        !autoSwitchTriedRef.current.has(sourceKeyOf(s)) &&
+        !probeCacheRef.current.has(sourceKeyOf(s))
+    );
+    if (queue.length === 0) return;
+    console.log(`⏭️ 后台开始探测 ${queue.length} 个候选源可播放性…`);
+    void (async () => {
+      const workers = Array.from(
+        { length: Math.min(AUTO_PROBE_CONCURRENCY, queue.length) },
+        async () => {
+          while (queue.length > 0) {
+            const s = queue.shift()!;
+            await probeSource(s);
+          }
+        }
+      );
+      await Promise.all(workers);
+      const okCount = sources.filter(
+        (s) => probeCacheRef.current.get(sourceKeyOf(s))?.ok
+      ).length;
+      console.log(`⏭️ 后台探测完成：${okCount}/${sources.length} 个源可播放`);
+    })();
+  };
 
   const checkAndAutoSwitchSource = async (graceExtended = false) => {
     const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
@@ -6180,37 +6287,16 @@ function PlayPageClient() {
     const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
     autoSwitchTriedRef.current.add(curKey);
 
-    // 自动测速：依次请求候选源详情（必须能解析出集数），按响应延迟排序，
-    // 选最快的切；解析失败的直接跳过并记住，避免切过去落到"未找到匹配结果"
-    const candidates: { s: SearchResult; latency: number }[] = [];
-    for (const s of list) {
-      const key = `${s.source}:${s.id}`;
-      if (autoSwitchTriedRef.current.has(key)) continue;
-      autoSwitchTriedRef.current.add(key);
-      const t0 = performance.now();
-      try {
-        const details = await fetchSourceDetail(
-          s.source,
-          s.id,
-          s.title || videoTitleRef.current
-        );
-        const latency = Math.round(performance.now() - t0);
-        if (
-          details.length > 0 &&
-          details[0].episodes &&
-          details[0].episodes.length > 0
-        ) {
-          console.log(`⏭️ 候选线路 ${s.source_name || s.source} 可用，延迟 ${latency}ms`);
-          candidates.push({ s, latency });
-        } else {
-          console.log(`⏭️ 候选线路 ${s.source_name || s.source} 详情解析失败，跳过`);
-        }
-      } catch (err) {
-        console.warn(`⏭️ 候选线路 ${s.source_name || s.source} 验证异常，跳过:`, err);
-      }
-    }
-    candidates.sort((a, b) => a.latency - b.latency);
-    const next = candidates[0]?.s;
+    // 在已探测出可播放的候选里按延迟选最快；后台探测若未完成则补测剩余
+    const untried = list.filter((s) => !autoSwitchTriedRef.current.has(sourceKeyOf(s)));
+    await Promise.all(untried.map((s) => probeSource(s)));
+    const playable = untried
+      .map((s) => ({ s, r: probeCacheRef.current.get(sourceKeyOf(s))! }))
+      .filter((x) => x.r && x.r.ok)
+      .sort((a, b) => a.r.latency - b.r.latency);
+    // 标记本轮参与选择的源已试，避免下次重复
+    playable.forEach((x) => autoSwitchTriedRef.current.add(sourceKeyOf(x.s)));
+    const next = playable[0]?.s;
     if (!next) {
       autoSwitchTriedRef.current.clear();
       console.log('⏭️ 所有线路 20 秒内均无画面，停止自动换源');
@@ -6235,10 +6321,26 @@ function PlayPageClient() {
     }
   };
 
-  // videoUrl 变化（换源/换集开始加载）→ 启动 20 秒看门狗
+  // videoUrl 变化（换源/换集开始加载）→ 启动 20 秒看门狗 + 后台探测各源可播放性
   useEffect(() => {
     clearAutoSwitchTimer();
     if (!videoUrl) return;
+    // 后台先行探测：当前源若 20 秒无画面，可直接切已探明可播的最快源
+    const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
+    const others = (availableSourcesRef.current || []).filter(
+      (s) => sourceKeyOf(s) !== curKey
+    );
+    if (others.length > 0) {
+      // 等一小会儿让 availableSources 有机会先就绪（后台搜索是异步的）
+      setTimeout(() => {
+        const latest = (availableSourcesRef.current || []).filter(
+          (s) =>
+            sourceKeyOf(s) !== `${currentSourceRef.current}:${currentIdRef.current}` &&
+            !autoSwitchTriedRef.current.has(sourceKeyOf(s))
+        );
+        probeSourcesInBackground(latest);
+      }, 3000);
+    }
     autoSwitchTimerRef.current = setTimeout(() => {
       autoSwitchTimerRef.current = null;
       void checkAndAutoSwitchSource();
