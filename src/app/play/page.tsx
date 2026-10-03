@@ -376,8 +376,7 @@ function PlayPageClient() {
     weightsCache: Map<string, any>;
     isActive: boolean;
     renderLoopActive: boolean;
-    resizeHandler: (() => void) | null;
-    resizeTimer: ReturnType<typeof setTimeout> | null;
+    gpuErrorCount: number;
   }>({
     instance: null,
     gpu: null,
@@ -385,8 +384,7 @@ function PlayPageClient() {
     weightsCache: new Map(),
     isActive: false,
     renderLoopActive: false,
-    resizeHandler: null,
-    resizeTimer: null,
+    gpuErrorCount: 0,
   });
 
   const websrEnabledRef = useRef(websrEnabled);
@@ -2495,15 +2493,48 @@ function PlayPageClient() {
         throw new Error('无法获取视频尺寸');
       }
 
-      // 初始化 GPU（复用已有的或创建新的）
-      if (!websrRef.current.gpu) {
-        const { default: WebSR } = await import('@websr/websr');
-        const gpu = await WebSR.initWebGPU();
-        if (!gpu) {
-          throw new Error('WebGPU 初始化失败');
-        }
-        websrRef.current.gpu = gpu;
+      // 初始化 GPU：每次都创建新 device。
+      // 注意：WebSR 实例 destroy 时会连带 destroy 掉传入的 device，
+      // 且 WebGPU 的错误（校验失败/设备丢失）都是异步上报、不会抛异常，
+      // 因此绝不能复用旧 device，否则会静默黑屏。
+      const { default: WebSR } = await import('@websr/websr');
+      const gpu = await WebSR.initWebGPU();
+      if (!gpu) {
+        throw new Error('WebGPU 初始化失败');
       }
+      websrRef.current.gpu = gpu;
+      websrRef.current.gpuErrorCount = 0;
+
+      // 监听 WebGPU 异步错误与设备丢失：失败时自动关闭超分并提示，
+      // 避免留下一块黑画布（错误不会抛异常，render 的 catch 捕获不到）
+      gpu.lost.then((info: GPUDeviceLostInfo) => {
+        const ref = websrRef.current;
+        // 主动 destroy 也会触发 lost；只有管线仍活跃时才是真的意外丢失
+        if (!ref.isActive) return;
+        console.error('WebSR GPU 设备丢失:', info.message);
+        ref.gpu = null;
+        setWebsrEnabled(false);
+        try { localStorage.setItem('websr_enabled', 'false'); } catch { /* ignore */ }
+        void destroyWebSR();
+        if (artPlayerRef.current) {
+          artPlayerRef.current.notice.show = '超分失败：GPU 设备丢失，已自动关闭';
+        }
+      });
+      gpu.onuncapturederror = (ev: GPUUncapturedErrorEvent) => {
+        const ref = websrRef.current;
+        ref.gpuErrorCount += 1;
+        console.warn(`WebSR GPU 未捕获错误 (${ref.gpuErrorCount}):`, (ev.error as Error)?.message || ev.error);
+        if (ref.gpuErrorCount >= 8 && ref.isActive) {
+          ref.isActive = false; // 防止重复触发
+          ref.gpu = null;
+          setWebsrEnabled(false);
+          try { localStorage.setItem('websr_enabled', 'false'); } catch { /* ignore */ }
+          void destroyWebSR();
+          if (artPlayerRef.current) {
+            artPlayerRef.current.notice.show = '超分失败：当前设备不支持，已自动关闭';
+          }
+        }
+      };
 
       // 创建 canvas
       const canvas = document.createElement('canvas');
@@ -2542,8 +2573,7 @@ function PlayPageClient() {
         websrRef.current.weightsCache.set(weightFile, weights);
       }
 
-      // 创建 WebSR 实例
-      const { default: WebSR } = await import('@websr/websr');
+      // 创建 WebSR 实例（WebSR 已在上面导入）
       const networkName = getWebsrNetworkName(websrModeRef.current, websrNetworkSizeRef.current);
 
       const websr = new WebSR({
@@ -2560,8 +2590,23 @@ function PlayPageClient() {
 
       // 使用 requestVideoFrameCallback 手动渲染循环
       const renderFrame = () => {
-        if (!websrRef.current.renderLoopActive || !websrRef.current.instance) return;
-        websrRef.current.instance.render(video).then(() => {
+        const ref = websrRef.current;
+        if (!ref.renderLoopActive || !ref.instance) return;
+        // HLS 自适应切换清晰度时视频分辨率会变：此时整条重建管线
+        //（库内 updateResolution 已在上面禁用，见注释）
+        const vw = video.videoWidth, vh = video.videoHeight;
+        const instRes = ref.instance.resolution as { width: number; height: number } | undefined;
+        if (vw && vh && instRes && (vw !== instRes.width || vh !== instRes.height)) {
+          console.log(`WebSR: 分辨率变化 ${instRes.width}x${instRes.height} -> ${vw}x${vh}，重建管线`);
+          void (async () => {
+            await destroyWebSR();
+            if (websrEnabledRef.current) {
+              await initWebSR();
+            }
+          })();
+          return;
+        }
+        ref.instance.render(video).then(() => {
           if (websrRef.current.renderLoopActive) {
             video.requestVideoFrameCallback(renderFrame);
           }
@@ -2578,31 +2623,10 @@ function PlayPageClient() {
       video.style.opacity = '0';
       video.style.position = 'absolute';
 
-      // 监听视频分辨率变化（HLS 自适应码率切换清晰度时会触发），防抖后重建管线；
-      // 否则 WebSR 内部纹理尺寸与新分辨率不匹配，输出会花屏
-      const onVideoResize = () => {
-        const ref = websrRef.current;
-        if (ref.resizeTimer) clearTimeout(ref.resizeTimer);
-        ref.resizeTimer = setTimeout(async () => {
-          ref.resizeTimer = null;
-          if (!ref.isActive || !artPlayerRef.current?.video) return;
-          const v = artPlayerRef.current.video as HTMLVideoElement;
-          const vw = v.videoWidth, vh = v.videoHeight;
-          if (!vw || !vh) return;
-          const scale = websrModeRef.current === 'upscale' ? 2 : 1;
-          const ew = Math.floor(vw * scale), eh = Math.floor(vh * scale);
-          const c = ref.canvas;
-          if (c && (c.width !== ew || c.height !== eh)) {
-            console.log(`WebSR: 分辨率变化 ${c.width}x${c.height} -> ${ew}x${eh}，重建管线`);
-            await destroyWebSR();
-            if (websrEnabledRef.current) {
-              await initWebSR();
-            }
-          }
-        }, 1200);
-      };
-      video.addEventListener('resize', onVideoResize);
-      websrRef.current.resizeHandler = onVideoResize;
+      // 库内的 updateResolution 有 bug：它会 destroy 掉传入的 GPUDevice，
+      // 然后用同一个已销毁的 device 重新初始化，导致 HLS 切换清晰度后静默黑屏。
+      // 这里禁用它，改由下面的渲染循环检测分辨率变化后整条重建（用全新的 device）。
+      (websr as any).updateResolution = () => {};
 
       const modeText = websrModeRef.current === 'upscale' ? '2x超分' : '降噪';
       const sizeText = { s: '快速', m: '标准', l: '高质' }[websrNetworkSizeRef.current];
@@ -2629,6 +2653,11 @@ function PlayPageClient() {
       websrRef.current.canvas = null;
       websrRef.current.instance = null;
       websrRef.current.isActive = false;
+      // 本次新建但未投入使用的 GPUDevice 直接销毁，避免泄漏
+      if (websrRef.current.gpu) {
+        try { websrRef.current.gpu.destroy(); } catch { /* ignore */ }
+        websrRef.current.gpu = null;
+      }
     }
   };
 
@@ -2638,21 +2667,14 @@ function PlayPageClient() {
     ref.isActive = false;
     ref.renderLoopActive = false;
 
-    // 移除分辨率变化监听
-    if (ref.resizeTimer) {
-      clearTimeout(ref.resizeTimer);
-      ref.resizeTimer = null;
-    }
-    if (ref.resizeHandler && artPlayerRef.current?.video) {
-      artPlayerRef.current.video.removeEventListener('resize', ref.resizeHandler);
-      ref.resizeHandler = null;
-    }
-
     try {
       if (ref.instance) {
         await ref.instance.destroy();
         ref.instance = null;
       }
+      // instance.destroy() 会连带 destroy 掉 GPUDevice，该引用已失效必须置空，
+      // 否则下次 init 会复用已销毁的 device 导致静默黑屏
+      ref.gpu = null;
 
       if (ref.canvas && ref.canvas.parentNode?.contains(ref.canvas)) {
         ref.canvas.parentNode.removeChild(ref.canvas);
