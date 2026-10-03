@@ -1,8 +1,8 @@
  
 'use client';
 
-import { Activity,AlertCircle, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
-import { useCallback,useEffect, useRef, useState } from 'react';
+import { Activity, AlertCircle, Check, Copy, ExternalLink, HardDriveDownload, Loader2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface AcgSearchItem {
   title: string;
@@ -46,6 +46,9 @@ export default function AcgSearch({
     Record<string, { health: string; seeders: number; leechers: number }>
   >({});
   const [checkingHealth, setCheckingHealth] = useState<string | null>(null);
+  // 推送 OpenList 离线下载（移植自 MoonTVPlus）
+  const [pushingDownload, setPushingDownload] = useState<string | null>(null);
+  const [pushedIds, setPushedIds] = useState<Record<string, boolean>>({});
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const isLoadingMoreRef = useRef(false);
 
@@ -246,6 +249,27 @@ export default function AcgSearch({
     }
   };
 
+  // 推送到 OpenList 离线下载（移植自 MoonTVPlus，仅管理员可用）
+  const pushToOpenList = async (item: AcgSearchItem) => {
+    const target = item.torrentUrl || item.link;
+    if (!target || pushingDownload) return;
+    setPushingDownload(item.guid);
+    try {
+      const res = await fetch('/api/acg/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: target, name: item.title, tool: 'aria2' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '推送失败');
+      setPushedIds((prev) => ({ ...prev, [item.guid]: true }));
+    } catch (err) {
+      onError?.(err instanceof Error ? err.message : '推送失败');
+    } finally {
+      setPushingDownload(null);
+    }
+  };
+
   if (loading && allItems.length === 0) {
     return (
       <div className='flex items-center justify-center py-12'>
@@ -409,6 +433,30 @@ export default function AcgSearch({
                   )}
                 </span>
               )}
+              {/* 推送到 OpenList 离线下载（移植自 MoonTVPlus，仅管理员可用） */}
+              <button
+                onClick={() => pushToOpenList(item)}
+                disabled={pushingDownload === item.guid || (!item.torrentUrl && !item.link)}
+                className='flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-purple-600 text-white text-sm hover:bg-purple-700 disabled:opacity-50 transition-colors'
+                title='推送到 OpenList 离线下载（需要管理员权限）'
+              >
+                {pushingDownload === item.guid ? (
+                  <>
+                    <Loader2 className='h-4 w-4 animate-spin' />
+                    <span>推送中</span>
+                  </>
+                ) : pushedIds[item.guid] ? (
+                  <>
+                    <Check className='h-4 w-4' />
+                    <span>已推送</span>
+                  </>
+                ) : (
+                  <>
+                    <HardDriveDownload className='h-4 w-4' />
+                    <span>离线下载</span>
+                  </>
+                )}
+              </button>
               <a
                 href={item.link}
                 target='_blank'
