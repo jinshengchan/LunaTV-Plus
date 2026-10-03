@@ -2958,58 +2958,59 @@ function PlayPageClient() {
     }
   }, [detail, currentEpisodeIndex]);
 
+  const fetchSourceDetail = async (
+    source: string,
+    id: string,
+    title?: string
+  ): Promise<SearchResult[]> => {
+    try {
+      let detailResponse;
+
+      // 判断是否为短剧源
+      if (source === 'shortdrama') {
+        // 传递 title 参数以支持备用API fallback
+        // 优先使用 URL 参数的 title，因为 videoTitleRef 可能还未初始化
+        const dramaTitle = searchParams.get('title') || videoTitleRef.current || '';
+        const titleParam = dramaTitle ? `&name=${encodeURIComponent(dramaTitle)}` : '';
+        detailResponse = await fetch(
+          `/api/shortdrama/detail?id=${id}&episode=1${titleParam}`
+        );
+      } else {
+        // 所有其他源（包括 Emby）统一使用 /api/detail
+        // 添加 title 参数用于搜索匹配
+        const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
+        detailResponse = await fetch(
+          `/api/detail?source=${source}&id=${id}${titleParam}`
+        );
+      }
+
+      if (!detailResponse.ok) {
+        throw new Error('获取视频详情失败');
+      }
+
+      const detailData = (await detailResponse.json()) as SearchResult;
+
+      // 对于短剧源，检查 title 和 poster 是否有效
+      if (source === 'shortdrama') {
+        if (!detailData.title || !detailData.poster) {
+          throw new Error('短剧源数据不完整（缺少标题或海报）');
+        }
+      }
+
+      // 注意：不检查episodes是否为空，因为有些源可能需要后续处理
+      // 即使episodes为空，也返回数据，让调用方决定如何处理
+
+      return [detailData];
+    } catch (err) {
+      console.error('获取视频详情失败:', err);
+      return [];
+    } finally {
+      setSourceSearchLoading(false);
+    }
+  };
+
   // 进入页面时直接获取全部源信息
   useEffect(() => {
-    const fetchSourceDetail = async (
-      source: string,
-      id: string,
-      title?: string
-    ): Promise<SearchResult[]> => {
-      try {
-        let detailResponse;
-
-        // 判断是否为短剧源
-        if (source === 'shortdrama') {
-          // 传递 title 参数以支持备用API fallback
-          // 优先使用 URL 参数的 title，因为 videoTitleRef 可能还未初始化
-          const dramaTitle = searchParams.get('title') || videoTitleRef.current || '';
-          const titleParam = dramaTitle ? `&name=${encodeURIComponent(dramaTitle)}` : '';
-          detailResponse = await fetch(
-            `/api/shortdrama/detail?id=${id}&episode=1${titleParam}`
-          );
-        } else {
-          // 所有其他源（包括 Emby）统一使用 /api/detail
-          // 添加 title 参数用于搜索匹配
-          const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
-          detailResponse = await fetch(
-            `/api/detail?source=${source}&id=${id}${titleParam}`
-          );
-        }
-
-        if (!detailResponse.ok) {
-          throw new Error('获取视频详情失败');
-        }
-
-        const detailData = (await detailResponse.json()) as SearchResult;
-
-        // 对于短剧源，检查 title 和 poster 是否有效
-        if (source === 'shortdrama') {
-          if (!detailData.title || !detailData.poster) {
-            throw new Error('短剧源数据不完整（缺少标题或海报）');
-          }
-        }
-
-        // 注意：不检查episodes是否为空，因为有些源可能需要后续处理
-        // 即使episodes为空，也返回数据，让调用方决定如何处理
-
-        return [detailData];
-      } catch (err) {
-        console.error('获取视频详情失败:', err);
-        return [];
-      } finally {
-        setSourceSearchLoading(false);
-      }
-    };
     const fetchSourcesData = async (query: string): Promise<SearchResult[]> => {
       // 使用智能搜索变体获取全部源信息
       try {
@@ -6178,9 +6179,33 @@ function PlayPageClient() {
     const list = availableSourcesRef.current || [];
     const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
     autoSwitchTriedRef.current.add(curKey);
-    const next = list.find(
-      (s) => !autoSwitchTriedRef.current.has(`${s.source}:${s.id}`)
-    );
+
+    // 依次验证候选源：详情能解析且有集数才切，
+    // 避免切到无效源后落到"未找到匹配结果"报错屏
+    let next: SearchResult | undefined;
+    for (const s of list) {
+      const key = `${s.source}:${s.id}`;
+      if (autoSwitchTriedRef.current.has(key)) continue;
+      autoSwitchTriedRef.current.add(key);
+      try {
+        const details = await fetchSourceDetail(
+          s.source,
+          s.id,
+          s.title || videoTitleRef.current
+        );
+        if (
+          details.length > 0 &&
+          details[0].episodes &&
+          details[0].episodes.length > 0
+        ) {
+          next = s;
+          break;
+        }
+        console.log(`⏭️ 候选线路 ${s.source_name || s.source} 详情解析失败，跳过`);
+      } catch (err) {
+        console.warn(`⏭️ 候选线路 ${s.source_name || s.source} 验证异常，跳过:`, err);
+      }
+    }
     if (!next) {
       autoSwitchTriedRef.current.clear();
       console.log('⏭️ 所有线路 20 秒内均无画面，停止自动换源');
