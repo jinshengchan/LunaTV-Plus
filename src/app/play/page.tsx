@@ -7,7 +7,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Hls from 'hls.js';
-import { Heart, ChevronUp, Download, X } from 'lucide-react';
+import { Heart, ChevronUp, Download, X, CloudDownload } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 
@@ -27,6 +27,8 @@ import VideoCard from '@/components/VideoCard';
 import CommentSection from '@/components/play/CommentSection';
 import DownloadButtons from '@/components/play/DownloadButtons';
 import ExternalPlayerMenu from '@/components/play/ExternalPlayerMenu';
+import OfflineDownloadEpisodeSelector from '@/components/OfflineDownloadEpisodeSelector';
+import { openOfflineDownloadPanel } from '@/components/OfflineDownloadPanelHost';
 import FavoriteButton from '@/components/play/FavoriteButton';
 import NetDiskButton from '@/components/play/NetDiskButton';
 import CollapseButton from '@/components/play/CollapseButton';
@@ -300,6 +302,11 @@ function PlayPageClient() {
 
   // 下载选集面板状态
   const [showDownloadEpisodeSelector, setShowDownloadEpisodeSelector] = useState(false);
+  // 服务器离线下载选集面板（移植自 MoonTVPlus）
+  const [showOfflineDownloadSelector, setShowOfflineDownloadSelector] = useState(false);
+  const offlineDownloadEnabled =
+    typeof process !== 'undefined' &&
+    process.env.NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD === 'true';
 
   // 下载功能启用状态
   const [downloadEnabled, setDownloadEnabled] = useState(true);
@@ -6236,6 +6243,20 @@ function PlayPageClient() {
               <ExternalPlayerMenu videoUrl={videoUrl} title={videoTitle} />
             )}
 
+            {/* 服务器离线下载（移植自 MoonTVPlus，需服务端开启） */}
+            {offlineDownloadEnabled && (
+              <button
+                onClick={() => setShowOfflineDownloadSelector(true)}
+                className='flex group relative items-center gap-1.5 sm:gap-2 px-2.5 sm:px-4 py-1.5 sm:py-2 min-h-[40px] sm:min-h-[44px] rounded-2xl bg-linear-to-br from-white/90 via-white/80 to-white/70 hover:from-white hover:via-white/95 hover:to-white/90 dark:from-gray-800/90 dark:via-gray-800/80 dark:to-gray-800/70 dark:hover:from-gray-800 dark:hover:via-gray-800/95 dark:hover:to-gray-800/90 backdrop-blur-md border border-white/60 dark:border-gray-700/60 shadow-[0_2px_8px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.25)] dark:shadow-[0_2px_8px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.1)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.3)] dark:hover:shadow-[0_4px_12px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.15)] hover:scale-105 active:scale-95 transition-all duration-300 overflow-hidden'
+                title='服务器离线下载（需管理员权限）'
+              >
+                <CloudDownload className='relative z-10 w-3.5 sm:w-4 h-3.5 sm:h-4 text-gray-600 dark:text-gray-400' />
+                <span className='relative z-10 hidden sm:inline text-xs font-medium text-gray-600 dark:text-gray-300'>
+                  离线下载
+                </span>
+              </button>
+            )}
+
             {/* 折叠控制按钮 - 仅在 lg 及以上屏幕显示 */}
             <CollapseButton
               isCollapsed={isEpisodeSelectorCollapsed}
@@ -6984,6 +7005,93 @@ function PlayPageClient() {
         }
       }}
       />
+
+      {/* 服务器离线下载选集面板（移植自 MoonTVPlus） */}
+      {offlineDownloadEnabled && (
+        <OfflineDownloadEpisodeSelector
+          isOpen={showOfflineDownloadSelector}
+          onClose={() => setShowOfflineDownloadSelector(false)}
+          totalEpisodes={detail?.episodes?.length || 1}
+          episodesTitles={detail?.episodes_titles || []}
+          videoTitle={videoTitle || '视频'}
+          currentEpisodeIndex={currentEpisodeIndex}
+          enableOfflineDownload
+          hasOfflinePermission
+          onDownload={async (episodeIndexes, offlineMode) => {
+            if (!offlineMode) {
+              toast.info('浏览器下载请使用下载按钮');
+              return;
+            }
+            let successCount = 0;
+            let skipped = 0;
+            let permissionDenied = false;
+            for (const episodeIndex of episodeIndexes) {
+              const episodeUrl =
+                detail?.episodes && detail.episodes.length > 0
+                  ? detail.episodes[episodeIndex]
+                  : videoUrl;
+              if (
+                !episodeUrl ||
+                episodeUrl.startsWith('shortdrama:') ||
+                !episodeUrl.includes('.m3u8')
+              ) {
+                skipped++;
+                continue;
+              }
+              try {
+                const res = await fetch('/api/offline-download', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    source: currentSource,
+                    videoId: currentId,
+                    episodeIndex,
+                    title: `${videoTitle || '视频'}_第${episodeIndex + 1}集`,
+                    m3u8Url: episodeUrl,
+                  }),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                  if (res.status === 403) permissionDenied = true;
+                  throw new Error(data.error || '创建任务失败');
+                }
+                successCount++;
+              } catch (err) {
+                console.error(`第${episodeIndex + 1}集离线下载任务创建失败:`, err);
+                if (!permissionDenied) {
+                  toast.error('离线下载任务创建失败', {
+                    description: (err as Error).message,
+                    duration: 5000,
+                  });
+                }
+                break;
+              }
+            }
+            if (permissionDenied && successCount === 0) {
+              toast.error('无权限', {
+                description: '服务器离线下载仅管理员可用',
+                duration: 5000,
+              });
+              return;
+            }
+            if (successCount > 0) {
+              toast.success(`已添加 ${successCount} 个离线下载任务`, {
+                description: skipped ? `跳过 ${skipped} 集（仅支持 M3U8）` : undefined,
+                action: {
+                  label: '查看任务',
+                  onClick: () => openOfflineDownloadPanel(),
+                },
+                duration: 5000,
+              });
+            } else if (skipped > 0) {
+              toast.warning('没有可离线下载的剧集', {
+                description: '仅支持 M3U8 格式',
+                duration: 4000,
+              });
+            }
+          }}
+        />
+      )}
     </>
   );
 }
