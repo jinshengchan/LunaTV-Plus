@@ -62,3 +62,4 @@ crash-reports.jsonl
 
 # sqlite data
 data/.push_state.json
+.push_state.json

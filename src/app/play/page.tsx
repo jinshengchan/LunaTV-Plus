@@ -6140,11 +6140,10 @@ function PlayPageClient() {
     loadAndInit();
   }, [Hls, videoUrl, loading, blockAdEnabled]);
 
-  // ===== 自动换源：单个源加载 20 秒不出画面（无首帧）则自动切可播放的源 =====
-  // 逻辑：videoUrl 变化时，后台并行探测各源真实可播放性（服务端拉 m3u8 验 #EXTM3U）；
-  // 20 秒无首帧 → 在已探测出可播放的源里按延迟选最快的切换；失败的源同集内不再试。
+  // ===== 自动换源：单个源加载 20 秒不出画面（无首帧）则自动测速切换 =====
+  // 逻辑：20 秒无首帧 → 按需逐个探测候选源真实可播放性（服务端拉 m3u8 验 #EXTM3U），
+  // 找到第一个可播的就切；失败的源同集内不再试。探测是串行的，避免并行打爆上游触发限流。
   const AUTO_SWITCH_TIMEOUT_MS = 20000;
-  const AUTO_PROBE_CONCURRENCY = 6;
   const autoSwitchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSwitchTriedRef = useRef<Set<string>>(new Set()); // 本集已试过且失败的 source:id
   const autoSwitchingRef = useRef(false);
@@ -6238,33 +6237,6 @@ function PlayPageClient() {
     }
   };
 
-  /** 后台并行探测一批源（限制并发），fire-and-forget */
-  const probeSourcesInBackground = (sources: SearchResult[]) => {
-    const queue = sources.filter(
-      (s) =>
-        !autoSwitchTriedRef.current.has(sourceKeyOf(s)) &&
-        !probeCacheRef.current.has(sourceKeyOf(s))
-    );
-    if (queue.length === 0) return;
-    console.log(`⏭️ 后台开始探测 ${queue.length} 个候选源可播放性…`);
-    void (async () => {
-      const workers = Array.from(
-        { length: Math.min(AUTO_PROBE_CONCURRENCY, queue.length) },
-        async () => {
-          while (queue.length > 0) {
-            const s = queue.shift()!;
-            await probeSource(s);
-          }
-        }
-      );
-      await Promise.all(workers);
-      const okCount = sources.filter(
-        (s) => probeCacheRef.current.get(sourceKeyOf(s))?.ok
-      ).length;
-      console.log(`⏭️ 后台探测完成：${okCount}/${sources.length} 个源可播放`);
-    })();
-  };
-
   const checkAndAutoSwitchSource = async (graceExtended = false) => {
     const video = artPlayerRef.current?.video as HTMLVideoElement | undefined;
     if (!video) {
@@ -6287,31 +6259,39 @@ function PlayPageClient() {
     const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
     autoSwitchTriedRef.current.add(curKey);
 
-    // 在已探测出可播放的候选里按延迟选最快；后台探测若未完成则补测剩余
-    const untried = list.filter((s) => !autoSwitchTriedRef.current.has(sourceKeyOf(s)));
-    await Promise.all(untried.map((s) => probeSource(s)));
-    const playable = untried
-      .map((s) => ({ s, r: probeCacheRef.current.get(sourceKeyOf(s))! }))
-      .filter((x) => x.r && x.r.ok)
-      .sort((a, b) => a.r.latency - b.r.latency);
-    // 标记本轮参与选择的源已试，避免下次重复
-    playable.forEach((x) => autoSwitchTriedRef.current.add(sourceKeyOf(x.s)));
-    const next = playable[0]?.s;
+    // 按需逐个探测：顺序测每个未试源的真实可播放性，找到第一个可播的就切，
+    // 避免并行打爆上游触发限流。已探测过的结果走缓存。
+    if (artPlayerRef.current) {
+      artPlayerRef.current.notice.show = '当前线路无响应，正在自动测速选择可用线路…';
+    }
+    let next: SearchResult | undefined;
+    let nextLatency = 0;
+    for (const s of list) {
+      const key = sourceKeyOf(s);
+      if (autoSwitchTriedRef.current.has(key)) continue;
+      const r = await probeSource(s);
+      autoSwitchTriedRef.current.add(key);
+      if (r.ok) {
+        next = s;
+        nextLatency = r.latency;
+        break;
+      }
+    }
     if (!next) {
       autoSwitchTriedRef.current.clear();
-      console.log('⏭️ 所有线路 20 秒内均无画面，停止自动换源');
+      console.log('⏭️ 所有候选线路均不可播放，停止自动换源');
       if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = '所有线路均加载超时，请手动切换';
+        artPlayerRef.current.notice.show = '所有线路均不可播放，请手动切换';
       }
       return;
     }
     autoSwitchingRef.current = true;
     try {
       console.log(
-        `⏭️ 当前线路 20 秒无画面，自动切换: ${currentSourceRef.current} -> ${next.source_name || next.source}`
+        `⏭️ 自动测速选中: ${next.source_name || next.source} (${nextLatency}ms)，切换`
       );
       if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = '当前线路无响应，自动切换线路…';
+        artPlayerRef.current.notice.show = `已找到可用线路（${nextLatency}ms），正在切换…`;
       }
       await handleSourceChange(next.source, next.id, next.title);
     } catch (err) {
@@ -6321,26 +6301,11 @@ function PlayPageClient() {
     }
   };
 
-  // videoUrl 变化（换源/换集开始加载）→ 启动 20 秒看门狗 + 后台探测各源可播放性
+  // videoUrl 变化（换源/换集开始加载）→ 启动 20 秒看门狗
+  // 探测改为 watchdog 触发时按需逐个进行，不再后台并行全量探测（防上游限流）
   useEffect(() => {
     clearAutoSwitchTimer();
     if (!videoUrl) return;
-    // 后台先行探测：当前源若 20 秒无画面，可直接切已探明可播的最快源
-    const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
-    const others = (availableSourcesRef.current || []).filter(
-      (s) => sourceKeyOf(s) !== curKey
-    );
-    if (others.length > 0) {
-      // 等一小会儿让 availableSources 有机会先就绪（后台搜索是异步的）
-      setTimeout(() => {
-        const latest = (availableSourcesRef.current || []).filter(
-          (s) =>
-            sourceKeyOf(s) !== `${currentSourceRef.current}:${currentIdRef.current}` &&
-            !autoSwitchTriedRef.current.has(sourceKeyOf(s))
-        );
-        probeSourcesInBackground(latest);
-      }, 3000);
-    }
     autoSwitchTimerRef.current = setTimeout(() => {
       autoSwitchTimerRef.current = null;
       void checkAndAutoSwitchSource();
