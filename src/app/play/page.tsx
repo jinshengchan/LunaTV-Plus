@@ -6180,32 +6180,37 @@ function PlayPageClient() {
     const curKey = `${currentSourceRef.current}:${currentIdRef.current}`;
     autoSwitchTriedRef.current.add(curKey);
 
-    // 依次验证候选源：详情能解析且有集数才切，
-    // 避免切到无效源后落到"未找到匹配结果"报错屏
-    let next: SearchResult | undefined;
+    // 自动测速：依次请求候选源详情（必须能解析出集数），按响应延迟排序，
+    // 选最快的切；解析失败的直接跳过并记住，避免切过去落到"未找到匹配结果"
+    const candidates: { s: SearchResult; latency: number }[] = [];
     for (const s of list) {
       const key = `${s.source}:${s.id}`;
       if (autoSwitchTriedRef.current.has(key)) continue;
       autoSwitchTriedRef.current.add(key);
+      const t0 = performance.now();
       try {
         const details = await fetchSourceDetail(
           s.source,
           s.id,
           s.title || videoTitleRef.current
         );
+        const latency = Math.round(performance.now() - t0);
         if (
           details.length > 0 &&
           details[0].episodes &&
           details[0].episodes.length > 0
         ) {
-          next = s;
-          break;
+          console.log(`⏭️ 候选线路 ${s.source_name || s.source} 可用，延迟 ${latency}ms`);
+          candidates.push({ s, latency });
+        } else {
+          console.log(`⏭️ 候选线路 ${s.source_name || s.source} 详情解析失败，跳过`);
         }
-        console.log(`⏭️ 候选线路 ${s.source_name || s.source} 详情解析失败，跳过`);
       } catch (err) {
         console.warn(`⏭️ 候选线路 ${s.source_name || s.source} 验证异常，跳过:`, err);
       }
     }
+    candidates.sort((a, b) => a.latency - b.latency);
+    const next = candidates[0]?.s;
     if (!next) {
       autoSwitchTriedRef.current.clear();
       console.log('⏭️ 所有线路 20 秒内均无画面，停止自动换源');
