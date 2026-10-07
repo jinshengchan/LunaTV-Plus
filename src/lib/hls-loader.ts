@@ -142,17 +142,29 @@ class OptimizedHlsLoader extends Hls.DefaultConfig.loader {
       try {
         // 移除 TypeScript 类型注解,转换为纯 JavaScript
         const jsCode = this.customAdFilterCode
-          .replace(/(\w+)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*([,)])/g, '$1$3')
-          .replace(/\)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*\{/g, ') {')
-          .replace(/(const|let|var)\s+(\w+)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*=/g, '$1 $2 =');
+          .replace(
+            /(\w+)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*([,)])/g,
+            '$1$3',
+          )
+          .replace(
+            /\)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*\{/g,
+            ') {',
+          )
+          .replace(
+            /(const|let|var)\s+(\w+)\s*:\s*(string|number|boolean|any|void|never|unknown|object)\s*=/g,
+            '$1 $2 =',
+          );
 
         // 创建并执行自定义函数
-        // eslint-disable-next-line no-new-func
-        const customFunction = new Function('type', 'm3u8Content',
-          jsCode + '\nreturn filterAdsFromM3U8(type, m3u8Content);'
+        const customFunction = new Function(
+          'type',
+          'm3u8Content',
+          jsCode + '\nreturn filterAdsFromM3U8(type, m3u8Content);',
         );
         const result = customFunction(this.currentSource, m3u8Content);
-        console.log('✅ 使用自定义去广告代码');
+        if (typeof result !== 'string') {
+          throw new TypeError('自定义去广告代码必须返回字符串');
+        }
         return result;
       } catch (err) {
         console.error('执行自定义去广告代码失败,降级使用默认规则:', err);
@@ -169,46 +181,47 @@ class OptimizedHlsLoader extends Hls.DefaultConfig.loader {
       'advert',
       'advertisement',
       '/adjump',
-      'redtraffic'
+      'redtraffic',
     ];
 
     const lines = m3u8Content.split('\n');
     const filteredLines: string[] = [];
-    let i = 0;
+    let skipNext = false;
 
-    while (i < lines.length) {
+    for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
 
-      // 跳过 #EXT-X-DISCONTINUITY 标识
-      if (line.includes('#EXT-X-DISCONTINUITY')) {
-        i++;
-        continue;
-      }
-
-      // 检测到 #AD 标记
+      // 检测到广告标记
       if (line.includes('#AD')) {
-        i++;
+        skipNext = true;
         continue;
       }
 
-      // 如果是 EXTINF 行，检查下一行 URL 是否包含广告关键字
-      if (line.includes('#EXTINF:')) {
-        if (i + 1 < lines.length) {
-          const nextLine = lines[i + 1];
-          const containsAdKeyword = adKeywords.some(keyword =>
-            nextLine.toLowerCase().includes(keyword.toLowerCase())
-          );
+      // 保持原有 #AD 状态机；URL 规则只检查媒体分片。
+      if (
+        line.startsWith('#EXTINF') &&
+        i + 1 < lines.length &&
+        adKeywords.some((keyword) =>
+          lines[i + 1].toLowerCase().includes(keyword),
+        )
+      ) {
+        i++;
+        skipNext = false;
+        continue;
+      }
 
-          if (containsAdKeyword) {
-            // 跳过 EXTINF 行和 URL 行
-            i += 2;
-            continue;
-          }
-        }
+      // 跳过广告的 #EXTINF 行
+      if (skipNext && line.startsWith('#EXTINF')) {
+        continue;
+      }
+
+      // 跳过广告的 URL 行
+      if (skipNext && !line.startsWith('#')) {
+        skipNext = false;
+        continue;
       }
 
       filteredLines.push(line);
-      i++;
     }
 
     return filteredLines.join('\n');
