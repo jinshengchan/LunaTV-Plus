@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { clearConfigCache, getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
+import { validateNetDiskAccount } from '@/lib/netdisk-playback';
 
 export const runtime = 'nodejs';
 
@@ -68,7 +69,19 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // 更新网盘配置
+    const previousPlayback = adminConfig.NetDiskConfig?.playback;
+    let playback = previousPlayback;
+    if (netDiskConfig.playback !== undefined) {
+      if (!netDiskConfig.playback || typeof netDiskConfig.playback.enabled !== 'boolean') {
+        return NextResponse.json({ error: '在线播放配置格式不正确' }, { status: 400 });
+      }
+      playback = {
+        enabled: netDiskConfig.playback.enabled,
+        quark: validateNetDiskAccount(netDiskConfig.playback.quark || { cookie: '' }),
+        uc: validateNetDiskAccount(netDiskConfig.playback.uc || { cookie: '' }),
+      };
+    }
+    // 更新网盘配置；旧客户端未提交新字段时保留播放账号。
     adminConfig.NetDiskConfig = {
       enabled: netDiskConfig.enabled,
       pansouUrl: netDiskConfig.pansouUrl.trim(),
@@ -77,6 +90,7 @@ export async function POST(request: NextRequest) {
       token: typeof netDiskConfig.token === 'string' ? netDiskConfig.token.trim() : '',
       username: typeof netDiskConfig.username === 'string' ? netDiskConfig.username.trim() : '',
       password: typeof netDiskConfig.password === 'string' ? netDiskConfig.password.trim() : '',
+      playback,
     };
 
     // 保存配置到数据库

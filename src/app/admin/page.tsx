@@ -7672,6 +7672,11 @@ const NetDiskConfig = ({
     token: '',
     username: '',
     password: '',
+    playback: {
+      enabled: false,
+      quark: { cookie: '', folderName: 'MoonTV在线播放' },
+      uc: { cookie: '', folderName: 'MoonTV在线播放' },
+    },
   });
 
   // 网盘类型选项
@@ -7702,6 +7707,11 @@ const NetDiskConfig = ({
         token: config.NetDiskConfig.token || '',
         username: config.NetDiskConfig.username || '',
         password: config.NetDiskConfig.password || '',
+        playback: {
+          enabled: config.NetDiskConfig.playback?.enabled ?? false,
+          quark: { cookie: config.NetDiskConfig.playback?.quark?.cookie || '', folderName: config.NetDiskConfig.playback?.quark?.folderName || 'MoonTV在线播放' },
+          uc: { cookie: config.NetDiskConfig.playback?.uc?.cookie || '', folderName: config.NetDiskConfig.playback?.uc?.folderName || 'MoonTV在线播放' },
+        },
       });
     }
   }, [config]);
@@ -7925,6 +7935,31 @@ const NetDiskConfig = ({
             </div>
           </div>
         </div>
+      </div>
+
+      <div className='space-y-4 rounded-lg border border-gray-200 dark:border-gray-700 p-4'>
+        <label className='flex items-center gap-2 font-medium'>
+          <input type='checkbox' checked={netDiskSettings.playback.enabled}
+            onChange={event => setNetDiskSettings(prev => ({ ...prev, playback: { ...prev.playback, enabled: event.target.checked } }))} />
+          搜索结果在线播放（夸克、UC）
+        </label>
+        <p className='text-sm text-gray-500'>配置站点共用的网盘账号。选择视频时会转存到指定目录，占用账号空间；已有文件不会自动删除。请仅在本站管理后台填写 Cookie。</p>
+        {(['quark', 'uc'] as const).map(provider => (
+          <div key={provider} className='space-y-2'>
+            <label htmlFor={`netdisk-${provider}-cookie`} className='block text-sm font-medium'>
+              {provider === 'quark' ? '夸克' : 'UC'}账号 Cookie
+            </label>
+            <input id={`netdisk-${provider}-cookie`} type='password' autoComplete='new-password'
+              value={netDiskSettings.playback[provider].cookie}
+              onChange={event => setNetDiskSettings(prev => ({ ...prev, playback: { ...prev.playback, [provider]: { ...prev.playback[provider], cookie: event.target.value } } }))}
+              className='w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2'
+              placeholder='从已登录的网盘网页版获取完整 Cookie' />
+            <label htmlFor={`netdisk-${provider}-folder`} className='block text-sm font-medium'>转存目录名称</label>
+            <input id={`netdisk-${provider}-folder`} value={netDiskSettings.playback[provider].folderName}
+              onChange={event => setNetDiskSettings(prev => ({ ...prev, playback: { ...prev.playback, [provider]: { ...prev.playback[provider], folderName: event.target.value } } }))}
+              className='w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2' />
+          </div>
+        ))}
       </div>
 
       {/* 保存按钮 */}

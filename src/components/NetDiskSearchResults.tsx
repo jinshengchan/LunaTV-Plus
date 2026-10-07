@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { ClipboardIcon, EyeIcon, EyeSlashIcon, LinkIcon } from '@heroicons/react/24/outline';
 
 interface NetDiskLink {
@@ -37,6 +38,35 @@ const CLOUD_TYPES = {
 };
 
 export default function NetDiskSearchResults({ results, loading, error, total }: NetDiskSearchResultsProps) {
+  const router = useRouter();
+  const [playbackAccounts, setPlaybackAccounts] = useState<Record<string, boolean>>({});
+  const [openingResource, setOpeningResource] = useState('');
+  const [playbackError, setPlaybackError] = useState('');
+  useEffect(() => {
+    let active = true;
+    fetch('/api/netdisk/files', { cache: 'no-store' })
+      .then(response => response.ok ? response.json() : {})
+      .then(accounts => { if (active) setPlaybackAccounts(accounts); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  const openResource = async (link: NetDiskLink, key: string) => {
+    if (openingResource) return;
+    setOpeningResource(key);
+    setPlaybackError('');
+    try {
+      const response = await fetch('/api/netdisk/files', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: link.url, password: link.password, title: link.note }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '读取网盘资源失败');
+      router.push(`/netdisk-play?session=${encodeURIComponent(data.sessionId)}`);
+    } catch (error) {
+      setPlaybackError(error instanceof Error ? error.message : '读取网盘资源失败');
+    } finally { setOpeningResource(''); }
+  };
   const [visiblePasswords, setVisiblePasswords] = useState<{ [key: string]: boolean }>({});
   const [copiedItems, setCopiedItems] = useState<{ [key: string]: boolean }>({});
   const [selectedFilter, setSelectedFilter] = useState<string[]>([]);
@@ -323,6 +353,7 @@ export default function NetDiskSearchResults({ results, loading, error, total }:
         </div>
       </div>
 
+      {playbackError && <p role='alert' className='rounded-lg bg-red-50 dark:bg-red-950 p-3 text-sm text-red-600 dark:text-red-300'>{playbackError}</p>}
       {/* 按网盘类型分组展示 */}
       <div className="space-y-6">
         {Object.entries(filteredResults || {}).map(([type, links]) => {
@@ -502,6 +533,14 @@ export default function NetDiskSearchResults({ results, loading, error, total }:
 
                       {/* 操作按钮 */}
                       <div className="sm:ml-4 shrink-0">
+                        {(type === 'quark' || type === 'uc') && (
+                          <button type='button' disabled={!playbackAccounts[type] || Boolean(openingResource)}
+                            title={playbackAccounts[type] ? '选择视频或剧集并在本站播放' : '需在管理后台配置该网盘的播放账号'}
+                            onClick={() => openResource(link, linkKey)}
+                            className='mb-2 inline-flex w-full justify-center rounded-md bg-green-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-50'>
+                            {openingResource === linkKey ? '正在读取资源…' : playbackAccounts[type] ? '在线播放' : '未配置播放账号'}
+                          </button>
+                        )}
                         <a
                           href={link.url}
                           target="_blank"

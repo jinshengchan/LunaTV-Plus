@@ -1,4 +1,5 @@
 import type { OpenListRuntimeConfig } from './openlist-config';
+import type { NetDiskPlaybackConfig } from './netdisk-share';
 
 export interface AdminConfig {
   ConfigSubscribtion: {
@@ -115,6 +116,7 @@ export interface AdminConfig {
     token?: string;                      // PanSou Bearer Token（可选）
     username?: string;                   // PanSou 登录用户名（可选）
     password?: string;                   // PanSou 登录密码（可选）
+    playback?: NetDiskPlaybackConfig;     // 站内网盘播放账号（仅后台可读）
   };
   AIRecommendConfig?: {
     enabled: boolean;                    // 是否启用AI推荐功能
