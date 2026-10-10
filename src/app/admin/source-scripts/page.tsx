@@ -87,10 +87,10 @@ export default function SourceScriptsPage() {
     'w-full rounded-lg border border-gray-300 bg-transparent p-3 dark:border-gray-600';
   return (
     <main className='mx-auto max-w-2xl space-y-6 px-4 py-8 text-gray-900 dark:text-gray-100'>
-      <Link href='/admin' className='text-green-600'>
-        ← 返回管理后台
+      <Link href='/admin#video-source' className='text-green-600'>
+        返回
       </Link>
-      <h1 className='text-2xl font-bold'>脚本视频源</h1>
+      <h1 className='text-2xl font-bold'>添加脚本视频源</h1>
       <p>
         选择 JSON 配置文件，或粘贴以 return
         开头的脚本。相同源标识会更新已有配置。

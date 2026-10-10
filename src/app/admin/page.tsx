@@ -4222,7 +4222,7 @@ const VideoSourceConfig = ({
               href='/admin/source-scripts'
               className='inline-flex shrink-0 items-center rounded-xl bg-green-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700'
             >
-              脚本视频源
+              添加脚本视频源
             </Link>
             <button
               onClick={() => setImportExportModal({ isOpen: true, mode: 'import' })}
@@ -8071,6 +8071,25 @@ function AdminPageClient() {
   }, [fetchConfig]);
 
   // 切换标签展开状态
+  // Return from script import directly to the expanded video-source section.
+  useEffect(() => {
+    if (loading) return;
+    let frame: number | undefined;
+    const openVideoSources = () => {
+      if (window.location.hash !== '#video-source') return;
+      setExpandedTabs(prev => ({ ...prev, videoSource: true }));
+      frame = requestAnimationFrame(() => {
+        document.getElementById('video-source')?.scrollIntoView({ block: 'start' });
+      });
+    };
+    openVideoSources();
+    window.addEventListener('hashchange', openVideoSources);
+    return () => {
+      window.removeEventListener('hashchange', openVideoSources);
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    };
+  }, [loading]);
+
   const toggleTab = (tabKey: string) => {
     setExpandedTabs((prev) => ({
       ...prev,
@@ -8228,16 +8247,18 @@ function AdminPageClient() {
             )}
 
             {/* 视频源配置标签 */}
-            <CollapsibleTab
-              title='视频源配置'
-              icon={
-                <Video size={20} className='text-gray-600 dark:text-gray-400' />
-              }
-              isExpanded={expandedTabs.videoSource}
-              onToggle={() => toggleTab('videoSource')}
-            >
-              <VideoSourceConfig config={config} refreshConfig={fetchConfig} />
-            </CollapsibleTab>
+            <div id='video-source' className='scroll-mt-24'>
+              <CollapsibleTab
+                title='视频源配置'
+                icon={
+                  <Video size={20} className='text-gray-600 dark:text-gray-400' />
+                }
+                isExpanded={expandedTabs.videoSource}
+                onToggle={() => toggleTab('videoSource')}
+              >
+                <VideoSourceConfig config={config} refreshConfig={fetchConfig} />
+              </CollapsibleTab>
+            </div>
 
             {/* 源检测标签 */}
             <CollapsibleTab
