@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { API_CONFIG, getAvailableApiSites } from '@/lib/config';
+import {
+  getScriptBrowserList,
+  getScriptBrowserSource,
+} from '@/lib/script-source-browser';
 
 export const runtime = 'nodejs';
 
@@ -19,17 +23,35 @@ export async function GET(request: NextRequest) {
   if (!sourceKey || !q) {
     return NextResponse.json(
       { error: '缺少 source 或 q 参数' },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
   try {
+    if (sourceKey.startsWith('script:')) {
+      const script = await getScriptBrowserSource(sourceKey);
+      if (!script)
+        return NextResponse.json(
+          { error: '脚本源不存在或已停用' },
+          { status: 403 },
+        );
+      const result = await getScriptBrowserList(
+        script.key,
+        null,
+        Math.max(1, page),
+        q,
+      );
+      return NextResponse.json({
+        ...result,
+        source: { key: sourceKey, name: script.name },
+      });
+    }
     const availableSites = await getAvailableApiSites(authInfo.username);
     const source = availableSites.find((s) => s.key === sourceKey);
     if (!source) {
       return NextResponse.json(
         { error: '你没有权限访问该资源源' },
-        { status: 403 }
+        { status: 403 },
       );
     }
 
@@ -37,7 +59,7 @@ export async function GET(request: NextRequest) {
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     // 常见搜索参数：ac=videolist&wd=<kw>&pg=<page>
     const url = `${source.api}?ac=videolist&wd=${encodeURIComponent(
-      q
+      q,
     )}&pg=${page}`;
     const res = await fetch(url, {
       headers: API_CONFIG.search.headers,
@@ -47,7 +69,7 @@ export async function GET(request: NextRequest) {
     if (!res.ok) {
       return NextResponse.json(
         { error: `上游返回错误: ${res.status}` },
-        { status: res.status }
+        { status: res.status },
       );
     }
     type AppleCMSItem = {
@@ -77,8 +99,8 @@ export async function GET(request: NextRequest) {
     const list: AppleCMSItem[] = Array.isArray(data.list)
       ? data.list
       : Array.isArray(data.data)
-      ? data.data
-      : [];
+        ? data.data
+        : [];
     const items = list
       .map((r) => ({
         id: String(r.vod_id ?? r.id ?? ''),

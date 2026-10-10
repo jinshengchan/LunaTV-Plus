@@ -20,6 +20,7 @@ type Item = {
   year: string;
   type_name?: string;
   remarks?: string;
+  source?: string;
 };
 
 // sessionStorage key for secondary UI state
@@ -527,7 +528,7 @@ export default function SourceBrowserPage() {
     try {
       const res = await fetch(
         `/api/detail?source=${encodeURIComponent(
-          activeSourceKey
+          item.source || activeSourceKey
         )}&id=${encodeURIComponent(item.id)}`
       );
       if (!res.ok) throw new Error('获取详情失败');
@@ -597,7 +598,7 @@ export default function SourceBrowserPage() {
 
   const goPlay = (item: Item) => {
     const params = new URLSearchParams();
-    params.set('source', activeSourceKey);
+    params.set('source', item.source || activeSourceKey);
     params.set('id', item.id);
     const mergedTitle = (previewData?.title || item.title || '').toString();
     const mergedYear = (previewData?.year || item.year || '').toString();

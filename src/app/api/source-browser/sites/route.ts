@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites } from '@/lib/config';
+import { listEnabledSourceScripts } from '@/lib/source-script';
 
 export const runtime = 'nodejs';
 
@@ -17,7 +18,12 @@ export async function GET(request: NextRequest) {
       .filter((s) => Boolean(s.api?.trim()))
       .map((s) => ({ key: s.key, name: s.name, api: s.api }));
 
-    return NextResponse.json({ sources });
+    const scripts = (await listEnabledSourceScripts()).map((item) => ({
+      key: `script:${item.key}`,
+      name: item.name,
+      api: '',
+    }));
+    return NextResponse.json({ sources: [...sources, ...scripts] });
   } catch (error) {
     return NextResponse.json({ error: '获取源列表失败' }, { status: 500 });
   }
