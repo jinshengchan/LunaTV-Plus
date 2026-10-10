@@ -5,6 +5,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
+import {
+  executeSavedSourceScript,
+  listEnabledSourceScripts,
+  normalizeScriptSearchResults,
+  normalizeScriptSources,
+} from '@/lib/source-script';
 import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'nodejs';
@@ -19,19 +25,54 @@ export async function GET(request: NextRequest) {
   const query = searchParams.get('q');
 
   if (!query) {
-    return new Response(
-      JSON.stringify({ error: '搜索关键词不能为空' }),
-      {
-        status: 400,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    return new Response(JSON.stringify({ error: '搜索关键词不能为空' }), {
+      status: 400,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
   }
 
   const config = await getConfig();
   const apiSites = await getAvailableApiSites(authInfo.username);
+
+  const scripts = await listEnabledSourceScripts();
+  const searchJobs = [
+    ...apiSites.map((site) => ({
+      key: site.key,
+      name: site.name,
+      search: () => searchFromApi(site, query),
+    })),
+    ...scripts.map((script) => ({
+      key: `script:${script.key}`,
+      name: script.name,
+      search: async () => {
+        const execution = await executeSavedSourceScript({
+          key: script.key,
+          hook: 'getSources',
+          payload: {},
+        });
+        const sources = normalizeScriptSources(execution.result);
+        const results = await Promise.all(
+          sources.map(async (source) => {
+            const search = await executeSavedSourceScript({
+              key: script.key,
+              hook: 'search',
+              payload: { keyword: query, page: 1, sourceId: source.id },
+            });
+            return normalizeScriptSearchResults({
+              scriptKey: script.key,
+              scriptName: script.name,
+              sourceId: source.id,
+              sourceName: source.name,
+              result: search.result,
+            });
+          }),
+        );
+        return results.flat();
+      },
+    })),
+  ];
 
   // 共享状态
   let streamClosed = false;
@@ -44,7 +85,10 @@ export async function GET(request: NextRequest) {
       // 辅助函数：安全地向控制器写入数据
       const safeEnqueue = (data: Uint8Array) => {
         try {
-          if (streamClosed || (!controller.desiredSize && controller.desiredSize !== 0)) {
+          if (
+            streamClosed ||
+            (!controller.desiredSize && controller.desiredSize !== 0)
+          ) {
             // 流已标记为关闭或控制器已关闭
             return false;
           }
@@ -62,8 +106,8 @@ export async function GET(request: NextRequest) {
       const startEvent = `data: ${JSON.stringify({
         type: 'start',
         query,
-        totalSources: apiSites.length,
-        timestamp: Date.now()
+        totalSources: searchJobs.length,
+        timestamp: Date.now(),
       })}\n\n`;
 
       if (!safeEnqueue(encoder.encode(startEvent))) {
@@ -75,24 +119,31 @@ export async function GET(request: NextRequest) {
       const allResults: any[] = [];
 
       // 为每个源创建搜索 Promise
-      const searchPromises = apiSites.map(async (site) => {
+      const searchPromises = searchJobs.map(async (site) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
           // 添加超时控制
           const searchPromise = Promise.race([
-            searchFromApi(site, query),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error(`${site.name} timeout`)), 20000)
+            site.search(),
+            new Promise(
+              (_, reject) =>
+                (timeout = setTimeout(
+                  () => reject(new Error(`${site.name} timeout`)),
+                  20000,
+                )),
             ),
           ]);
 
-          const results = await searchPromise as any[];
+          const results = (await searchPromise) as any[];
 
           // 过滤黄色内容
           let filteredResults = results;
           if (!config.SiteConfig.DisableYellowFilter) {
             filteredResults = results.filter((result) => {
               const typeName = result.type_name || '';
-              return !yellowWords.some((word: string) => typeName.includes(word));
+              return !yellowWords.some((word: string) =>
+                typeName.includes(word),
+              );
             });
           }
 
@@ -105,7 +156,7 @@ export async function GET(request: NextRequest) {
               source: site.key,
               sourceName: site.name,
               results: filteredResults,
-              timestamp: Date.now()
+              timestamp: Date.now(),
             })}\n\n`;
 
             if (!safeEnqueue(encoder.encode(sourceEvent))) {
@@ -117,7 +168,6 @@ export async function GET(request: NextRequest) {
           if (filteredResults.length > 0) {
             allResults.push(...filteredResults);
           }
-
         } catch (error) {
           console.warn(`搜索失败 ${site.name}:`, error);
 
@@ -130,7 +180,7 @@ export async function GET(request: NextRequest) {
               source: site.key,
               sourceName: site.name,
               error: error instanceof Error ? error.message : '搜索失败',
-              timestamp: Date.now()
+              timestamp: Date.now(),
             })}\n\n`;
 
             if (!safeEnqueue(encoder.encode(errorEvent))) {
@@ -138,33 +188,25 @@ export async function GET(request: NextRequest) {
               return; // 连接已关闭，停止处理
             }
           }
-        }
-
-        // 检查是否所有源都已完成
-        if (completedSources === apiSites.length) {
-          if (!streamClosed) {
-            // 发送最终完成事件
-            const completeEvent = `data: ${JSON.stringify({
-              type: 'complete',
-              totalResults: allResults.length,
-              completedSources,
-              timestamp: Date.now()
-            })}\n\n`;
-
-            if (safeEnqueue(encoder.encode(completeEvent))) {
-              // 只有在成功发送完成事件后才关闭流
-              try {
-                controller.close();
-              } catch (error) {
-                console.warn('Failed to close controller:', error);
-              }
-            }
-          }
+        } finally {
+          if (timeout) clearTimeout(timeout);
         }
       });
 
       // 等待所有搜索完成
       await Promise.allSettled(searchPromises);
+      if (!streamClosed) {
+        const event = `data: ${JSON.stringify({
+          type: 'complete',
+          totalResults: allResults.length,
+          completedSources,
+          timestamp: Date.now(),
+        })}\n\n`;
+        if (safeEnqueue(encoder.encode(event))) {
+          streamClosed = true;
+          controller.close();
+        }
+      }
     },
 
     cancel() {
@@ -179,7 +221,7 @@ export async function GET(request: NextRequest) {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+      Connection: 'keep-alive',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET',
       'Access-Control-Allow-Headers': 'Content-Type',
