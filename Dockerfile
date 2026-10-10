@@ -14,6 +14,9 @@ RUN pnpm store prune && pnpm install --frozen-lockfile
 
 # ---- 第 2 阶段：构建项目 ----
 FROM node:22-alpine AS builder
+# 构建参数：离线下载开关（客户端组件在构建时内联 NEXT_PUBLIC_ 变量）
+ARG NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD=false
+ENV NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD=$NEXT_PUBLIC_ENABLE_OFFLINE_DOWNLOAD
 # 安装构建工具以编译原生模块
 RUN apk add --no-cache python3 make g++
 RUN corepack enable && corepack prepare pnpm@latest --activate
