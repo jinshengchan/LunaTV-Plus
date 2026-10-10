@@ -2,6 +2,8 @@
 
 'use client';
 
+import Link from 'next/link';
+
 import {
   closestCenter,
   DndContext,
@@ -8100,6 +8102,9 @@ function AdminPageClient() {
             <h1 className='text-2xl font-bold text-gray-900 dark:text-gray-100 mb-8'>
               管理员设置
             </h1>
+            <Link href='/admin/source-scripts' className='rounded-md bg-green-600 px-3 py-2 text-sm text-white'>
+              脚本视频源
+            </Link>
             <div className='space-y-6'>
               {Array.from({ length: 3 }).map((_, index) => (
                 <div
