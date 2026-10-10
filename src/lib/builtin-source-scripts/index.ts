@@ -3,6 +3,7 @@
 // Ported for LunaTV-Plus (CC BY-NC-SA 4.0).
 
 import { SOURCE_SCRIPT_18J_CODE } from './18j';
+import { SOURCE_SCRIPT_HUANGGUO_CODE } from './huangguo';
 
 export interface BuiltinSourceScript {
   key: string;
@@ -12,6 +13,12 @@ export interface BuiltinSourceScript {
 }
 
 export const BUILTIN_SOURCE_SCRIPTS: BuiltinSourceScript[] = [
+  {
+    key: 'huangguo_fongmi',
+    name: '黄果短剧',
+    description: '分类分页、搜索和分集播放',
+    code: SOURCE_SCRIPT_HUANGGUO_CODE,
+  },
   {
     key: 'j18',
     name: '18J',
