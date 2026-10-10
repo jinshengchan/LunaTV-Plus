@@ -8102,9 +8102,6 @@ function AdminPageClient() {
             <h1 className='text-2xl font-bold text-gray-900 dark:text-gray-100 mb-8'>
               管理员设置
             </h1>
-            <Link href='/admin/source-scripts' className='rounded-md bg-green-600 px-3 py-2 text-sm text-white'>
-              脚本视频源
-            </Link>
             <div className='space-y-6'>
               {Array.from({ length: 3 }).map((_, index) => (
                 <div
@@ -8131,10 +8128,13 @@ function AdminPageClient() {
       <div className='-mt-6 md:mt-0'>
         <div className='max-w-[95%] mx-auto pb-40 md:pb-safe-bottom'>
           {/* 标题 + 重置配置按钮 */}
-          <div className='flex items-center gap-2 mb-8'>
+          <div className='flex flex-wrap items-center gap-2 mb-8'>
             <h1 className='text-2xl font-bold text-gray-900 dark:text-gray-100'>
               管理员设置
             </h1>
+            <Link href='/admin/source-scripts' className='rounded-md bg-green-600 px-3 py-2 text-sm text-white'>
+              脚本视频源
+            </Link>
             {config && role === 'owner' && (
               <button
                 onClick={handleResetConfig}
