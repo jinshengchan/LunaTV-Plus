@@ -4217,7 +4217,13 @@ const VideoSourceConfig = ({
               <div className='hidden sm:block w-px h-6 bg-gray-300 dark:bg-gray-600 order-2'></div>
             </>
           )}
-          <div className='flex items-center gap-2 order-1 sm:order-2'>
+          <div className='flex flex-wrap items-center gap-2 order-1 sm:order-2'>
+            <Link
+              href='/admin/source-scripts'
+              className='inline-flex shrink-0 items-center rounded-xl bg-green-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700'
+            >
+              脚本视频源
+            </Link>
             <button
               onClick={() => setImportExportModal({ isOpen: true, mode: 'import' })}
               className='group px-4 py-2 text-sm rounded-xl font-medium flex items-center space-x-2 bg-gradient-to-br from-blue-600 via-cyan-500 to-blue-500 hover:from-blue-700 hover:via-cyan-600 hover:to-blue-600 text-white shadow-lg shadow-blue-500/30 hover:shadow-xl hover:shadow-cyan-500/40 hover:-translate-y-0.5 active:scale-95 transition-all duration-300 backdrop-blur-sm border border-white/10'
@@ -8132,9 +8138,6 @@ function AdminPageClient() {
             <h1 className='text-2xl font-bold text-gray-900 dark:text-gray-100'>
               管理员设置
             </h1>
-            <Link href='/admin/source-scripts' className='rounded-md bg-green-600 px-3 py-2 text-sm text-white'>
-              脚本视频源
-            </Link>
             {config && role === 'owner' && (
               <button
                 onClick={handleResetConfig}
